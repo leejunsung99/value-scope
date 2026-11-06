@@ -1,0 +1,18 @@
+# Optional: PostgreSQL via Docker (local PostgreSQL install also supported).
+# Set POSTGRES_PASSWORD in .env (git-ignored) before `docker compose up -d`.
+# DATABASE_URL=postgresql+psycopg://valuescope:<password>@localhost:5432/valuescope
+services:
+  db:
+    image: postgres:17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: valuescope
+      POSTGRES_DB: valuescope
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:5432:5432"   # bind to localhost only
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

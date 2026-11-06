@@ -1,0 +1,3 @@
+#!/bin/sh
+# Block commits containing secrets or forbidden files.
+exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(git rev-parse --show-toplevel)/scripts/check_secrets.ps1"

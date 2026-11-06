@@ -1,0 +1,71 @@
+# ===== Secrets / environment =====
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+secrets/
+credentials*.json
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ===== Node / frontend =====
+node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/test-results/
+frontend/playwright-report/
+*.tsbuildinfo
+
+# ===== Logs =====
+logs/
+*.log
+npm-debug.log*
+
+# ===== Databases / backups =====
+*.db
+*.sqlite
+*.sqlite3
+*.dump
+*.backup
+*.bak
+pgdata/
+db_backups/
+
+# ===== Local raw data & analysis output (never commit) =====
+data/
+storage/
+raw/
+reports/
+exports/
+*.xlsx
+*.xls
+*.csv
+*.zip
+*.xml
+!frontend/**/*.xml
+
+# ===== OS / editor / temp =====
+.DS_Store
+Thumbs.db
+desktop.ini
+*.tmp
+*.temp
+tmp/
+.idea/
+.vscode/*
+!.vscode/extensions.json
+.claude/settings.local.json

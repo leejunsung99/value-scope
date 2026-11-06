@@ -1,0 +1,21 @@
+title = "value-scope gitleaks config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "dart-api-key"
+description = "OpenDART API key (40 hex chars) assigned to a variable"
+regex = '''(?i)dart[_-]?api[_-]?key\s*[=:]\s*['"]?([0-9a-f]{40})'''
+secretGroup = 1
+
+[[rules]]
+id = "postgres-url-with-password"
+description = "PostgreSQL URL containing an inline password"
+regex = '''postgres(?:ql)?(?:\+\w+)?://[^:\s/]+:([^@\s<>]{3,})@'''
+secretGroup = 1
+
+[allowlist]
+description = "Placeholders and test fixtures"
+paths = ['''\.env\.example$''']
+regexes = ['''<password>''', '''test_password''', '''\$\{''']
