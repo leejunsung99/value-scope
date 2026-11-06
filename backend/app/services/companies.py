@@ -101,7 +101,9 @@ def upsert_company_from_dart(db: Session, dart: DartClient, corp_code: str, refr
     if company is None:
         company = Company(company_key=f"dart:{corp_code}", corp_code=corp_code, name=info.get("corp_name", ""))
         db.add(company)
-    company.name = info.get("corp_name") or company.name
+    # 화면 표시는 종목명(stock_name, 예: '야스'), 법인명(예: '(주)야스')은 검증 메모에 보존
+    legal_name = (info.get("corp_name") or "").strip()
+    company.name = (info.get("stock_name") or "").strip() or legal_name or company.name
     company.name_en = info.get("corp_name_eng") or None
     company.stock_code = stock_code
     company.market = market
@@ -112,7 +114,10 @@ def upsert_company_from_dart(db: Session, dart: DartClient, corp_code: str, refr
     hm = (info.get("hm_url") or "").strip()
     company.homepage = hm or None
     company.is_verified = True
-    company.verification_note = f"OpenDART 기업개황(company.json) 확인 — corp_cls={info.get('corp_cls')}"
+    company.verification_note = (
+        f"OpenDART 기업개황(company.json) 확인 — 법인명 {legal_name}, 법인구분 corp_cls={info.get('corp_cls')}"
+        + ("" if company.is_listed else " (상장사 아님 — 상장폐지·비상장 여부 확인 필요)")
+    )
     company.info_source = "OpenDART company.json"
     company.info_fetched_at = utcnow()
     db.flush()

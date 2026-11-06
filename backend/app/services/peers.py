@@ -47,6 +47,11 @@ from app.services.peer_seeds import SEED_CANDIDATES
 log = logging.getLogger(__name__)
 
 MAX_MENTION_CANDIDATES = 20
+# 상장사 이름이지만 사업보고서 본문에서 일반명사로 흔히 쓰이는 단어 (본문 언급 탐지에서 제외)
+COMMON_WORD_NAMES = {
+    "대상", "디바이스", "서비스", "시스템", "솔루션", "에너지", "케미칼", "테크", "코스모", "미래산업",
+    "한국", "대한", "동방", "세원", "신원", "우리", "전방", "전기", "정상", "진원", "태양", "영원",
+}
 MAX_CANDIDATE_REPORTS = 25
 OVERVIEW_EXCERPT_CHARS = 3000
 AI_TARGET_TEXT_CHARS = 150_000
@@ -176,7 +181,8 @@ def find_mentions(text: str, registry: list[CorpRegistry], exclude_codes: set[st
     covered: list[tuple[int, int]] = []
     found: dict[str, dict] = {}
     entries = sorted(
-        (r for r in registry if r.stock_code and r.corp_code not in exclude_codes and len(r.corp_name) >= 2),
+        (r for r in registry if r.stock_code and r.corp_code not in exclude_codes and len(r.corp_name) >= 2
+         and r.corp_name not in COMMON_WORD_NAMES),
         key=lambda r: len(r.corp_name),
         reverse=True,
     )
@@ -241,9 +247,10 @@ def _ai_schema() -> dict:
             "evidence_quotes": {"type": "array", "items": {"type": "string"}},
             "criteria": {"type": "array", "items": crit},
             "is_new_suggestion": {"type": "boolean"},
+            "relevance": {"type": "string", "enum": ["related", "unrelated_mention"]},
         },
         "required": ["name", "stock_code", "category", "main_business", "main_products", "similarity",
-                     "selection_reason", "caution", "evidence_quotes", "criteria", "is_new_suggestion"],
+                     "selection_reason", "caution", "evidence_quotes", "criteria", "is_new_suggestion", "relevance"],
         "additionalProperties": False,
     }
     return {
@@ -281,7 +288,9 @@ def build_ai_prompt(target: Company, target_text: str, drafts: list[Draft]) -> s
         "루브릭 항목(product, process, customer, revenue, cycle)을 1/0.5/0/unknown으로 평가하십시오.\n"
         "3) 원문에 근거가 있는 추가 관련 기업이 있으면 is_new_suggestion=true로 추가하십시오(국내 상장사는 종목코드 포함). "
         "근거가 없으면 추가하지 마십시오.\n"
-        "4) 비교 시 주의점(사업 비중 차이, 비상장, 지주사 구조 등)을 caution에 적으십시오."
+        "4) 비교 시 주의점(사업 비중 차이, 비상장, 지주사 구조 등)을 caution에 적으십시오.\n"
+        "5) 출처가 '사업보고서 본문 언급'인 후보가 실제로는 일반명사이거나 사업과 무관한 단순 언급이면 "
+        "relevance='unrelated_mention'으로 표시하고 selection_reason에 그 이유를 적으십시오. 그 외에는 'related'."
     )
     return "\n\n".join(parts)
 
@@ -310,6 +319,7 @@ def apply_ai(
     by_code = {d.company.stock_code: d for d in drafts if d.company.stock_code}
     by_name = {company_svc.normalize_name(d.company.name): d for d in drafts}
     rejected_quotes = 0
+    dropped: list[str] = []
     for item in result.data.get("candidates", []):
         code = (item.get("stock_code") or "").strip().zfill(6) if (item.get("stock_code") or "").strip().isdigit() else ""
         d = by_code.get(code) or by_name.get(company_svc.normalize_name(item.get("name", "")))
@@ -321,6 +331,10 @@ def apply_ai(
                 continue
             drafts.append(d)
             by_name[company_svc.normalize_name(d.company.name)] = d
+        if item.get("relevance") == "unrelated_mention" and d.origin == "report_mention":
+            dropped.append(f"{d.company.name}({item.get('selection_reason', '').strip()[:80]})")
+            drafts.remove(d)
+            continue
         d.category = item.get("category") or d.category
         d.main_business = item.get("main_business") or d.main_business
         d.main_products = item.get("main_products") or d.main_products
@@ -347,6 +361,8 @@ def apply_ai(
                 "origin": "ai",
                 "evidence": verified_quotes[:2] or None,
             }
+    if dropped:
+        slog.info(f"AI 판단: 본문 단순 언급·무관 후보 {len(dropped)}개 제외 — " + "; ".join(dropped))
     if rejected_quotes:
         slog.warn(f"AI가 제시한 인용문 {rejected_quotes}건이 공시 원문에서 확인되지 않아 근거에서 제외했습니다.")
     return drafts
@@ -520,6 +536,18 @@ def _run(db: Session, project: Project, session: PeerSearchSession, dart: DartCl
         db.flush()
         merge_candidate_into_group(db, project, cand)
 
+    # 사용자가 손대지 않은 자동 추천(proposed) 중 이번 검색에서 다시 발견되지 않은 기업은 제외 처리
+    found_ids = {d.company.id for d in draft_list}
+    group = get_or_create_group(db, project)
+    stale = [m for m in group.memberships
+             if m.status == "proposed" and m.added_by in ("report_mention", "ai") and m.company_id not in found_ids]
+    for m in stale:
+        m.status = "excluded"
+        m.note = f"재검색(세션 {session.id})에서 다시 발견되지 않아 자동 제외 — 필요 시 복원 가능"
+    if stale:
+        slog.info(f"이전 검색의 자동 추천 중 이번에 발견되지 않은 {len(stale)}개를 제외 처리했습니다(복원 가능): "
+                  + ", ".join(m.company.name for m in stale))
+
     session.status = "succeeded" if dart_ok and target_doc else ("partial" if draft_list else "failed")
     db.commit()
 
@@ -568,8 +596,14 @@ def _seed_draft(db: Session, dart: DartClient | None, s: dict, slog: SearchLog) 
     except DartError as e:
         slog.warn(f"초기 후보 '{s['name']}' 기업개황 조회 실패: {e}")
         return None
+    cautions = []
+    if not company.is_listed:
+        notes.append(f"DART 법인구분상 현재 상장사가 아님({company.market}) — 상장폐지·이전 여부 확인 필요")
+        cautions.append("현재 상장 주가가 확인되지 않아 주식가치 비교에는 사용할 수 없습니다.")
+        slog.warn(f"초기 후보 '{s['name']}'({company.stock_code})은 DART 기준 현재 상장사가 아닙니다.")
     status = "mismatch" if notes else "verified"
     return Draft(company=company, category=s["category"], origin="seed", reasons=[f"초기 후보 목록: {hint}"],
+                 cautions=cautions,
                  verification_status=status,
                  verification_notes=notes or [f"DART 확인: {company.name} / {company.stock_code} / {company.market}"])
 

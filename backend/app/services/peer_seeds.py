@@ -13,8 +13,8 @@ SEED_CANDIDATES: dict[str, list[dict]] = {
         {"name": "AP시스템", "aliases": ["에이피시스템"], "expected_stock_code": "265520", "category": "B", "hint": "유관 장비"},
         {"name": "힘스", "expected_stock_code": "238490", "category": "B", "hint": "유관 장비"},
         {"name": "비아트론", "expected_stock_code": "141000", "category": "B", "hint": "유관 장비"},
-        {"name": "에스엔유", "expected_stock_code": "080000", "category": "B", "hint": "유관 장비"},
-        {"name": "에스에프에이", "expected_stock_code": "056190", "category": "B", "hint": "유관 장비"},
+        {"name": "에스엔유", "aliases": ["에스엔유프리시젼"], "expected_stock_code": "080000", "category": "B", "hint": "유관 장비"},
+        {"name": "에스에프에이", "aliases": ["SFA"], "expected_stock_code": "056190", "category": "B", "hint": "유관 장비"},
         {"name": "LG디스플레이", "expected_stock_code": "034220", "category": "C", "hint": "전방산업"},
         {"name": "덕산네오룩스", "expected_stock_code": "213420", "category": "D", "hint": "소재 관련"},
     ]

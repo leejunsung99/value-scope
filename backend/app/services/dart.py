@@ -95,12 +95,15 @@ def xml_to_text(markup: str) -> str:
     return "\n".join(ln for ln in lines if ln)
 
 
+_BUSINESS_TITLE_RE = re.compile(r"<TITLE[^>]*>\s*(?:I{2}|Ⅱ)\s*\.\s*사업의\s*내용\s*</TITLE>")
+
+
 def extract_business_section(markup: str) -> str | None:
     """Extract 'II. 사업의 내용' section text from a DART 사업보고서 XML document."""
-    start = re.search(r"<TITLE[^>]*>\s*I{2}\.\s*사업의\s*내용\s*</TITLE>", markup)
+    start = _BUSINESS_TITLE_RE.search(markup)
     if not start:
         return None
-    end = re.search(r"<TITLE[^>]*>\s*I{3}\.\s*재무에\s*관한\s*사항", markup[start.end():])
+    end = re.search(r"<TITLE[^>]*>\s*(?:I{3}|Ⅲ)\s*\.\s*재무에\s*관한\s*사항", markup[start.end():])
     body = markup[start.end(): start.end() + end.start()] if end else markup[start.end():]
     return xml_to_text(body)
 
@@ -199,6 +202,15 @@ class DartClient:
     def document_markup(self, rcept_no: str) -> str:
         zf = self._get_zip("document.xml", rcept_no=rcept_no)
         names = [n for n in zf.namelist() if n.lower().endswith(".xml")]
-        # main document is named <rcept_no>.xml
-        main = next((n for n in names if n.startswith(rcept_no)), names[0])
-        return decode_dart_xml(zf.read(main))
+        if not names:
+            raise DartNoData("공시 원문 XML이 없습니다.", "014")
+        # The zip also holds attachments (e.g. the audit report, <rcept_no>_00760.xml).
+        # The main document is exactly <rcept_no>.xml; otherwise pick the one with the
+        # business section, falling back to the largest file.
+        exact = next((n for n in names if n.rsplit("/", 1)[-1] == f"{rcept_no}.xml"), None)
+        if exact:
+            return decode_dart_xml(zf.read(exact))
+        docs = {n: decode_dart_xml(zf.read(n)) for n in names}
+        with_section = [n for n, t in docs.items() if _BUSINESS_TITLE_RE.search(t)]
+        pick = with_section[0] if with_section else max(docs, key=lambda n: len(docs[n]))
+        return docs[pick]

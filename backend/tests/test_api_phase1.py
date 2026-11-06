@@ -201,3 +201,28 @@ def test_system_status_hides_secrets(client):
     s = client.get("/api/system/status").json()
     assert set(s["integrations"]) >= {"dart", "krx", "ai_provider"}
     assert all(isinstance(v, (bool, str)) for v in s["integrations"].values())
+
+
+class DropMentionAI(FakeAI):
+    def complete_json(self, system, prompt, schema):
+        return AIResult(provider="fake", model="fake-model", data={
+            "target_summary": {"main_business": "", "main_products": "", "customers": "", "revenue_structure": ""},
+            "candidates": [{"name": "테스트전자", "stock_code": "999990", "category": "E", "main_business": "",
+                            "main_products": "", "similarity": "", "selection_reason": "일반명사 언급", "caution": "",
+                            "evidence_quotes": [], "criteria": [], "is_new_suggestion": False,
+                            "relevance": "unrelated_mention"}]})
+
+
+def test_ai_drops_unrelated_mentions_and_stale_proposals_are_excluded(client, monkeypatch):
+    pid = _create(client).json()["id"]
+    _search(client, pid)  # no AI: 테스트전자 proposed via report mention
+    peers = client.get(f"/api/projects/{pid}/peers").json()
+    assert next(m for m in peers["members"] if m["company"]["name"] == "테스트전자")["status"] == "proposed"
+
+    monkeypatch.setattr(api_module, "make_ai", lambda: DropMentionAI())
+    s = _search(client, pid)
+    assert "테스트전자" not in {c["company"]["name"] for c in s["candidates"]}
+    assert any("단순 언급" in m["message"] for m in s["messages"])
+    peers = client.get(f"/api/projects/{pid}/peers").json()
+    m = next(m for m in peers["members"] if m["company"]["name"] == "테스트전자")
+    assert m["status"] == "excluded" and "자동 제외" in m["note"]

@@ -86,3 +86,31 @@ def test_claude_cli_command_is_lean(monkeypatch):
     assert "--strict-mcp-config" in cmd and "--no-session-persistence" in cmd
     assert cmd[cmd.index("--model") + 1] == "opus"
     assert cmd[cmd.index("--system-prompt") + 1] == "SYS"
+
+
+def test_document_markup_picks_main_file_not_attachment():
+    import io
+    import zipfile
+
+    from app.services.dart import DartClient, extract_business_section
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("20260101000001_00760.xml", "<TITLE>독립된 감사인의 감사보고서</TITLE>" + "x" * 5000)
+        z.writestr("20260101000001.xml", "<TITLE>Ⅱ. 사업의 내용</TITLE><P>본문</P><TITLE>Ⅲ. 재무에 관한 사항</TITLE>")
+
+    class Resp:
+        content = buf.getvalue()
+        def raise_for_status(self): pass
+
+    class Http:
+        def get(self, *a, **k): return Resp()
+
+    m = DartClient("k" * 40, http=Http()).document_markup("20260101000001")
+    assert extract_business_section(m) == "본문"
+
+
+def test_common_word_company_names_ignored():
+    text = "이번 대상 기간 동안 디바이스 수요가 증가했다. 고객사 LG디스플레이."
+    reg = [_reg("1", "대상", "001680"), _reg("2", "디바이스", "187870"), _reg("3", "LG디스플레이", "034220")]
+    assert set(find_mentions(text, reg, set())) == {"3"}
