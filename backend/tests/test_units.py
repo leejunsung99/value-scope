@@ -73,3 +73,16 @@ def test_gitignore_and_env_example_safe():
             key, _, value = line.partition("=")
             if key.endswith(("KEY", "TOKEN", "PASSWORD")) or key == "DATABASE_URL":
                 assert value == "", f"{key} must be empty in .env.example"
+
+
+def test_claude_cli_command_is_lean(monkeypatch):
+    import shutil
+
+    from app.services.ai import ClaudeCLIProvider
+
+    monkeypatch.setattr(shutil, "which", lambda _: "claude")
+    cmd = ClaudeCLIProvider("opus").build_command("SYS")
+    assert cmd[cmd.index("--tools") + 1] == ""  # no tools
+    assert "--strict-mcp-config" in cmd and "--no-session-persistence" in cmd
+    assert cmd[cmd.index("--model") + 1] == "opus"
+    assert cmd[cmd.index("--system-prompt") + 1] == "SYS"

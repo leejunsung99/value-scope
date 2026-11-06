@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 
 from app.config import Settings
@@ -101,46 +102,67 @@ class AnthropicProvider(AIProvider):
 
 
 class ClaudeCLIProvider(AIProvider):
+    """Headless `claude -p` call, kept lean: no tools, no MCP servers, our own system
+    prompt, no session persistence, and a neutral working directory so no project
+    CLAUDE.md is loaded. Uses the CLI's own login (OAuth) — no API key in this app."""
+
     name = "claude_cli"
 
-    def __init__(self, model: str, timeout: int = 600):
+    def __init__(self, model: str = "opus", timeout: int = 900):
         exe = shutil.which("claude")
         if not exe:
-            raise AIUnavailable("claude CLI를 찾을 수 없습니다.")
+            raise AIUnavailable("claude CLI를 찾을 수 없습니다. Claude Code 설치 및 로그인(`claude`)을 확인하세요.")
         self.exe = exe
-        self.model = model
+        self.model = model or "opus"
         self.timeout = timeout
+
+    def build_command(self, system: str) -> list[str]:
+        return [
+            self.exe, "-p",
+            "--output-format", "json",
+            "--model", self.model,
+            "--tools", "",
+            "--strict-mcp-config",
+            "--no-session-persistence",
+            "--system-prompt", system,
+        ]
 
     def complete_json(self, system: str, prompt: str, schema: dict) -> AIResult:
         full = (
-            f"{system}\n\n{prompt}\n\n"
+            f"{prompt}\n\n"
             "Respond with ONLY a JSON object (no markdown fences) matching this JSON schema:\n"
             f"{json.dumps(schema, ensure_ascii=False)}"
         )
         try:
-            proc = subprocess.run(
-                [self.exe, "-p", "--output-format", "json", "--model", self.model],
-                input=full,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                timeout=self.timeout,
-            )
+            with tempfile.TemporaryDirectory(prefix="valuescope-ai-") as cwd:
+                proc = subprocess.run(
+                    self.build_command(system),
+                    input=full,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    timeout=self.timeout,
+                    cwd=cwd,
+                )
         except subprocess.TimeoutExpired as e:
             raise AIError("claude CLI 응답 시간 초과") from e
-        if proc.returncode != 0:
-            raise AIError(f"claude CLI 실행 실패 (exit {proc.returncode})")
         try:
             outer = json.loads(proc.stdout)
-            text = outer.get("result", "") if isinstance(outer, dict) else ""
-            text = text.strip()
-            if text.startswith("```"):
-                text = text.strip("`")
-                text = text[text.find("{"):]
+        except json.JSONDecodeError:
+            outer = None
+        if proc.returncode != 0 or not isinstance(outer, dict) or outer.get("is_error"):
+            detail = (outer or {}).get("result") if isinstance(outer, dict) else (proc.stdout or proc.stderr)
+            detail = str(detail or "").strip()[:200]
+            if "unrecognized_model" in detail:
+                detail = f"CLI가 모델 '{self.model}'을 인식하지 못했습니다. CLAUDE_CLI_MODEL을 opus/sonnet 등으로 설정하세요."
+            raise AIError(f"claude CLI 실행 실패 (exit {proc.returncode}): {detail}")
+        text = str(outer.get("result", "")).strip()
+        try:
             data = json.loads(text[text.find("{"): text.rfind("}") + 1])
         except (json.JSONDecodeError, ValueError) as e:
             raise AIError("claude CLI 응답 JSON 파싱 실패") from e
-        return AIResult(data=data, provider=self.name, model=self.model)
+        used = [m for m in (outer.get("modelUsage") or {}) if "haiku" not in m] or [self.model]
+        return AIResult(data=data, provider=self.name, model=", ".join(used))
 
 
 def get_provider(settings: Settings) -> AIProvider:
@@ -149,7 +171,7 @@ def get_provider(settings: Settings) -> AIProvider:
         if p == "anthropic":
             return AnthropicProvider(settings.ai_api_key, settings.ai_model)
         if p == "claude_cli":
-            return ClaudeCLIProvider(settings.ai_model)
+            return ClaudeCLIProvider(settings.claude_cli_model)
     except AIUnavailable as e:
         return NoAIProvider(f"AI_PROVIDER={p} 사용 불가: {e}")
     return NoAIProvider()

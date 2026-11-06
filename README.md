@@ -46,7 +46,8 @@ notepad .env    # DART_API_KEY, (선택) KRX_API_KEY, AI_PROVIDER/AI_API_KEY 입
 | `DART_API_KEY` | [OpenDART](https://opendart.fss.or.kr/) 인증키 (무료). 기업 검색·동종업계 탐색에 필수 |
 | `KRX_API_KEY` | [KRX Open API](https://openapi.krx.co.kr/) 인증키 (PHASE 2 주가 수집) |
 | `NEWS_API_KEY` | 뉴스 검색 API (선택) |
-| `AI_PROVIDER` | `anthropic` (권장, API 키 필요) · `claude_cli` (로컬 Claude Code CLI 로그인 사용) · `none` |
+| `AI_PROVIDER` | `claude_cli` (기본, 로컬 Claude Code CLI 로그인 사용) · `anthropic` (API 키 필요) · `none` |
+| `CLAUDE_CLI_MODEL` | CLI 모델 별칭 `opus` · `sonnet` · `haiku` (CLI는 API 모델 ID를 받지 않음) |
 | `AI_API_KEY` / `AI_MODEL` | Anthropic API 키 / 모델 ID (기본 `claude-opus-5-5`) |
 | `APP_HOST` / `APP_PORT` | 기본 `127.0.0.1:8000` (localhost 외 바인딩은 차단) |
 

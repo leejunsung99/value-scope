@@ -23,6 +23,8 @@ class Settings(BaseSettings):
     ai_provider: str = Field(default="none", alias="AI_PROVIDER")
     ai_api_key: str = Field(default="", alias="AI_API_KEY")
     ai_model: str = Field(default="claude-opus-5-5", alias="AI_MODEL")
+    # Claude CLI takes model aliases (opus / sonnet / haiku) rather than API model IDs.
+    claude_cli_model: str = Field(default="opus", alias="CLAUDE_CLI_MODEL")
     app_host: str = Field(default="127.0.0.1", alias="APP_HOST")
     app_port: int = Field(default=8000, alias="APP_PORT")
 
