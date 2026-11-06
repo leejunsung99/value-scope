@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     ai_model: str = Field(default="claude-opus-5-5", alias="AI_MODEL")
     # Claude CLI takes model aliases (opus / sonnet / haiku) rather than API model IDs.
     claude_cli_model: str = Field(default="opus", alias="CLAUDE_CLI_MODEL")
+    # Read-only access to the separate dart-market-monitor database (shared raw source).
+    dart_monitor_database_url: str = Field(default="", alias="DART_MONITOR_DATABASE_URL")
+    # The API keys are shared with dart-market-monitor; cap ValueScope's own usage per day.
+    dart_daily_call_limit: int = Field(default=3000, alias="DART_DAILY_CALL_LIMIT")
+    krx_daily_call_limit: int = Field(default=1000, alias="KRX_DAILY_CALL_LIMIT")
     app_host: str = Field(default="127.0.0.1", alias="APP_HOST")
     app_port: int = Field(default=8000, alias="APP_PORT")
 
@@ -38,6 +43,7 @@ class Settings(BaseSettings):
             "dart": bool(self.dart_api_key),
             "krx": bool(self.krx_api_key),
             "news": bool(self.news_api_key),
+            "dart_monitor": bool(self.dart_monitor_database_url),
             "ai_provider": self.ai_provider,
             "ai_ready": self.ai_provider == "claude_cli"
             or (self.ai_provider == "anthropic" and bool(self.ai_api_key)),
