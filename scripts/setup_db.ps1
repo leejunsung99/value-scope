@@ -23,6 +23,8 @@ param(
     [string]$MonitorDatabase = "dart_monitor",
     [string]$MonitorOwner = "dart_monitor",
     [string]$ReaderUser = "valuescope_reader",
+    # 관리자 비밀번호를 이미 보관 중인 파일 (POSTGRES_ADMIN_PASSWORD=...). 없으면 입력을 요청합니다.
+    [string]$AdminPasswordFile = (Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) "dart-market-monitor\.env.postgres.local"),
     [switch]$SkipMonitor,
     [switch]$Force
 )
@@ -84,10 +86,20 @@ if (-not $psql) {
 }
 if (-not $psql) { throw "psql.exe를 찾을 수 없습니다. PostgreSQL을 설치하거나 Docker Compose를 사용하세요." }
 
-$secure = Read-Host "PostgreSQL 관리자($AdminUser) 비밀번호" -AsSecureString
-$bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-$env:PGPASSWORD = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-[Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+$adminPw = ""
+if ($AdminPasswordFile -and (Test-Path $AdminPasswordFile)) {
+    $line = Get-Content $AdminPasswordFile -Encoding UTF8 | Where-Object { $_ -match "^POSTGRES_ADMIN_PASSWORD=" } | Select-Object -First 1
+    if ($line) { $adminPw = $line.Substring("POSTGRES_ADMIN_PASSWORD=".Length).Trim().Trim('"').Trim("'") }
+    if ($adminPw) { Write-Host "관리자 비밀번호를 '$AdminPasswordFile'에서 읽었습니다 (저장·출력하지 않음)." }
+}
+if (-not $adminPw) {
+    $secure = Read-Host "PostgreSQL 관리자($AdminUser) 비밀번호" -AsSecureString
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    $adminPw = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+}
+$env:PGPASSWORD = $adminPw
+$adminPw = $null
 
 try {
     # ---------------------------------------------------------- 1) ValueScope DB
