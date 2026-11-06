@@ -10,11 +10,11 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.pool import StaticPool
 
 from app import api as api_module
 from app import db as db_module
 from app.db import Base
+from app import models_analysis  # noqa: F401  (register PHASE 2 tables)
 from app.services.dart import CorpCodeEntry, DartNoData, DartNotConfigured
 
 TARGET_TEXT = (
@@ -83,13 +83,13 @@ class FakeDart:
 
 
 @pytest.fixture()
-def engine():
+def engine(tmp_path):
     url = os.environ.get("TEST_DATABASE_URL")
     if url:
         eng = create_engine(url)
         Base.metadata.drop_all(eng)
     else:
-        eng = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+        eng = create_engine(f"sqlite:///{tmp_path / 'test.db'}", connect_args={"check_same_thread": False, "timeout": 30})
     Base.metadata.create_all(eng)
     db_module.set_engine(eng)
     yield eng

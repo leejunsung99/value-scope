@@ -2,8 +2,9 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
 import ProjectLayout from './pages/ProjectLayout'
+import { CompanyDetail, Step3Results } from './pages/Results'
 import Step1Peers from './pages/Step1Peers'
-import { Step2Analysis, Step3Results, Step4History } from './pages/StepsPending'
+import { Step2Analysis, Step4History } from './pages/StepsAnalysis'
 
 export default function App() {
   return (
@@ -15,6 +16,7 @@ export default function App() {
           <Route path="peers" element={<Step1Peers />} />
           <Route path="analysis" element={<Step2Analysis />} />
           <Route path="results" element={<Step3Results />} />
+          <Route path="results/company/:companyId" element={<CompanyDetail />} />
           <Route path="history" element={<Step4History />} />
         </Route>
         <Route path="*" element={<Navigate to="/" replace />} />

@@ -10,9 +10,17 @@ AI-powered company valuation and peer analysis platform — 고객사와 동종�
 |---|---|---|
 | 0 | 저장소·폴더 구성, FastAPI/React 초기화, PostgreSQL·Alembic, 보안 설정(gitleaks, hooks) | ✅ |
 | 1 | 고객사 등록·중복 방지, 프로젝트 카드, DART 기업 검색, 동종업계 탐색·분류·근거·적합성 점수, 편집, 비교군 버전 확정 | ✅ (실데이터는 `DART_API_KEY` 필요) |
-| 2 | DART·KRX 재무/주가/공시/수주 증분 수집, 가치평가 엔진, AI 분석 | ⏳ 예정 |
-| 3 | 결과 대시보드·ECharts 그래프·근거 기반 보고서 | ⏳ 예정 |
-| 4 | Snapshot·이력 비교·재분석 | ⏳ 예정 |
+| 2 | DART 재무·공시·수주 / KRX 주가 증분 수집(공시알람 DB 읽기 전용 재사용, 일일 호출 상한), 가치평가 엔진 3종, 주가 변동 분해 | ✅ |
+| 3 | 종합 평가·ECharts 그래프 10종·동종업계 상세·근거 기반 AI 보고서 + Review 검증·근거 상세보기 | ✅ |
+| 4 | 실행별 Snapshot 보존, 이력 조회, 과거↔최신 비교, 비교군 변경 시 재분석 필요 표시 | ✅ (기본) |
+
+### 분석 방식 요약 (PHASE 2~3)
+- **수집**: 재무(OpenDART `fnlttSinglAcntAll`, 최근 4년 분기·연간), 주가(KRX 일별매매정보 — 최근 1년 일별 + 3년 월말), 공시목록(공시알람 DB가 커버하는 기간은 그 DB에서, 이전 기간만 DART), 수주(단일판매·공급계약 공시 원문 — 정정공시를 원계약과 묶어 중복 제거), 수주잔고(정기보고서 수주상황 표 — `수주총액 − 기납품액 = 수주잔고` 산식이 맞을 때만 사실로 채택)
+- **평가**: A. 수주잔고 기반 미래이익 × EV/EBIT, B. 동종업계 EV/EBIT·PER 분포, C. 자사 과거 EV/EBIT·PER·PBR 분포(공시 시점 기준, 미래정보 미사용). 지분가치 = EV − 순차입금 − 비지배지분, 주당가치는 상장주식수 − 자기주식 기준
+- **판단 규칙**: 현재가 < 보수적 → 저평가, > 낙관적 → 고평가, 그 사이 → 적정. 다음은 **판단 유보** — 방법 2개 미만, 신뢰도 40 미만, 방법 간 기준값 3배 초과 차이, 전체 범위 3배 초과. 분포가 3배 넘게 흩어진 배수는 비교 근거에서 제외
+- **주가 변동 분해**: 개별수익률 = α + β시장×시장 + β산업×(시장으로 설명되지 않는 동종업계 수익률) — 산업요인을 시장에 직교화해 중복 합산 방지. 이상 변동일은 공시와의 시간적 근접만 표시(인과 단정 안 함)
+- **보고서**: Claude가 엔진 근거(E1…)만 인용해 8개 섹션 작성 → 코드가 수치·근거ID·결론을 대조 → Review Agent가 기간·근거·반대논거 점검. 검증 실패 문단은 확정 결과로 게시하지 않음
+- **알려진 데이터 제약**: KRX 지수 API 미승인 시 시가총액가중 **대용지수** 사용, KRX 수정주가 미제공 → 상장주식수 변동으로 분할·병합 보정, EBITDA는 공시 현금흐름표에 감가상각비 계정이 있을 때만 산출, 뉴스 API 미연동
 
 ## 기술 스택
 
@@ -49,7 +57,10 @@ notepad .env    # DART_API_KEY, (선택) KRX_API_KEY, AI_PROVIDER/AI_API_KEY 입
 | `AI_PROVIDER` | `claude_cli` (기본, 로컬 Claude Code CLI 로그인 사용) · `anthropic` (API 키 필요) · `none` |
 | `CLAUDE_CLI_MODEL` | CLI 모델 별칭 `opus` · `sonnet` · `haiku` (CLI는 API 모델 ID를 받지 않음) |
 | `AI_API_KEY` / `AI_MODEL` | Anthropic API 키 / 모델 ID (기본 `claude-opus-5-5`) |
-| `APP_HOST` / `APP_PORT` | 기본 `127.0.0.1:8000` (localhost 외 바인딩은 차단) |
+| `CLAUDE_CLI_MODEL` | `claude_cli` 모드의 모델 별칭 (`opus` 등) |
+| `DART_MONITOR_DATABASE_URL` | (선택) dart-market-monitor DB **읽기 전용** 접속 — `setup_db.ps1`이 SELECT 전용 계정으로 생성 |
+| `DART_DAILY_CALL_LIMIT` / `KRX_DAILY_CALL_LIMIT` | ValueScope 일일 API 호출 상한 (다른 서비스와 키를 공유할 때 몫을 남김) |
+| `APP_HOST` / `APP_PORT` | 기본 `127.0.0.1:8000` (localhost 외 바인딩은 차단, 포트 충돌 시 변경) |
 
 ### 4) 데이터베이스 설정
 로컬 PostgreSQL을 사용하는 경우 (관리자 비밀번호는 입력만 받고 저장하지 않습니다):

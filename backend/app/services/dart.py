@@ -118,9 +118,11 @@ def decode_dart_xml(raw: bytes) -> str:
 
 
 class DartClient:
-    def __init__(self, api_key: str, http: httpx.Client | None = None, timeout: float = 30.0):
+    def __init__(self, api_key: str, http: httpx.Client | None = None, timeout: float = 30.0, on_call=None):
         self.api_key = api_key
         self.http = http or httpx.Client(timeout=timeout)
+        # on_call(endpoint) is invoked before every request (daily call budget accounting)
+        self.on_call = on_call
 
     def _require_key(self) -> None:
         if not self.api_key:
@@ -128,6 +130,8 @@ class DartClient:
 
     def _get_json(self, path: str, **params) -> dict:
         self._require_key()
+        if self.on_call:
+            self.on_call(path)
         try:
             resp = self.http.get(f"{BASE_URL}/{path}", params={"crtfc_key": self.api_key, **params})
             resp.raise_for_status()
@@ -143,6 +147,8 @@ class DartClient:
 
     def _get_zip(self, path: str, **params) -> zipfile.ZipFile:
         self._require_key()
+        if self.on_call:
+            self.on_call(path)
         try:
             resp = self.http.get(f"{BASE_URL}/{path}", params={"crtfc_key": self.api_key, **params})
             resp.raise_for_status()
@@ -186,6 +192,29 @@ class DartClient:
         if pblntf_detail_ty:
             params["pblntf_detail_ty"] = pblntf_detail_ty
         return self._get_json("list.json", **params)
+
+    def financial_statements(self, corp_code: str, year: int, reprt_code: str, fs_div: str) -> list[dict]:
+        return self._get_json("fnlttSinglAcntAll.json", corp_code=corp_code, bsns_year=str(year),
+                              reprt_code=reprt_code, fs_div=fs_div).get("list", [])
+
+    def share_status(self, corp_code: str, year: int, reprt_code: str) -> list[dict]:
+        return self._get_json("stockTotqySttus.json", corp_code=corp_code, bsns_year=str(year),
+                              reprt_code=reprt_code).get("list", [])
+
+    def disclosures_all(self, corp_code: str, bgn_de: str, end_de: str, pblntf_ty: str | None = None) -> list[dict]:
+        """Paginated list.json (max 100 per page)."""
+        out: list[dict] = []
+        page = 1
+        while True:
+            try:
+                data = self.disclosures(corp_code, bgn_de=bgn_de, end_de=end_de, pblntf_ty=pblntf_ty, page_no=page)
+            except DartNoData:
+                break
+            out.extend(data.get("list", []))
+            if page >= int(data.get("total_page", 1) or 1):
+                break
+            page += 1
+        return out
 
     def latest_business_report(self, corp_code: str) -> dict | None:
         """가장 최근 사업보고서(A001) 공시 1건. 정정 공시가 있으면 최신 접수건."""

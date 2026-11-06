@@ -56,6 +56,9 @@ export interface Company {
 }
 
 export interface PeerState {
+  last_run: { id: string; status: string; started_at: string; peer_version_no: number } | null
+  latest_result_run_id: string | null
+  needs_reanalysis: boolean
   latest_version_no: number
   draft_dirty: boolean
   included_count: number

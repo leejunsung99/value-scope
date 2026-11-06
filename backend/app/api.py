@@ -112,8 +112,20 @@ def _peer_state(db: Session, project: Project) -> dict:
     group = db.scalar(select(PeerGroup).where(PeerGroup.project_id == project.id))
     last_search = db.scalar(select(PeerSearchSession).where(PeerSearchSession.project_id == project.id)
                             .order_by(PeerSearchSession.id.desc()).limit(1))
+    from app.models_analysis import AnalysisRun
+
+    last_run = db.scalar(select(AnalysisRun).where(AnalysisRun.project_id == project.id)
+                         .order_by(AnalysisRun.started_at.desc()).limit(1))
+    done_run = db.scalar(select(AnalysisRun).where(AnalysisRun.project_id == project.id,
+                                                   AnalysisRun.status.in_(["succeeded", "partial"]))
+                         .order_by(AnalysisRun.started_at.desc()).limit(1))
+    latest_no = group.latest_version_no if group else 0
     return {
-        "latest_version_no": group.latest_version_no if group else 0,
+        "last_run": {"id": last_run.id, "status": last_run.status, "started_at": last_run.started_at,
+                     "peer_version_no": last_run.peer_version_no} if last_run else None,
+        "latest_result_run_id": done_run.id if done_run else None,
+        "needs_reanalysis": bool(latest_no) and (done_run is None or done_run.peer_version_no < latest_no),
+        "latest_version_no": latest_no,
         "draft_dirty": pg.is_dirty(group) if group else False,
         "included_count": sum(1 for m in group.memberships if m.status == "included") if group else 0,
         "last_search": {"id": last_search.id, "status": last_search.status, "started_at": last_search.started_at,
