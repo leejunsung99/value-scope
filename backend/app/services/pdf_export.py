@@ -83,7 +83,8 @@ def add_page_numbers(pdf: bytes, label: str = "ValueScope") -> bytes:
     for i, page in enumerate(writer.pages, start=1):
         w, h = float(page.mediabox.width), float(page.mediabox.height)
         num = f"{i} / {n}"
-        ops = (f"q 0.45 g BT /F1 8 Tf {w / 2 - len(num) * 2.2:.1f} 20 Td ({num}) Tj ET "
+        # 쪽 번호는 오른쪽 아래 — 왼쪽 꼬리말이 길어도 겹치지 않게
+        ops = (f"q 0.45 g BT /F1 8 Tf {w - 40 - len(num) * 4.4:.1f} 20 Td ({num}) Tj ET "
                f"BT /F1 7 Tf 40 20 Td ({safe}) Tj ET Q")
         overlay = PageObject.create_blank_page(width=w, height=h)
         font = DictionaryObject({NameObject("/Type"): NameObject("/Font"), NameObject("/Subtype"): NameObject("/Type1"),

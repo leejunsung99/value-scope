@@ -80,6 +80,43 @@ def list_weekly(project_id: str, db: Session = Depends(get_session)):
     return [to_dict(w) for w in rows]
 
 
+@router.get("/projects/{project_id}/weekly/{weekly_id}/report.pdf")
+def weekly_pdf(project_id: str, weekly_id: str, db: Session = Depends(get_session)):
+    """주간 리포트 PDF: 인쇄용 화면을 로컬 Edge/Chrome(headless)으로 변환. 파일명 = 회사명_주간리포트_주시작일.pdf"""
+    import re
+    from urllib.parse import quote
+
+    from fastapi.responses import Response
+
+    from app.config import get_settings
+    from app.main import DIST
+    from app.services.pdf_export import PdfUnavailable, render_pdf
+
+    w = db.get(WeeklyAnalysis, weekly_id)
+    if not w or w.project_id != project_id:
+        raise HTTPException(404, "주간 분석을 찾을 수 없습니다.")
+    if w.status != "succeeded":
+        raise HTTPException(409, "완료된 주간 분석만 PDF로 출력할 수 있습니다.")
+    if not (DIST / "index.html").exists():
+        raise HTTPException(409, "빌드된 화면이 없어 서버에서 PDF를 만들 수 없습니다(개발 모드). '브라우저 인쇄로 저장'을 이용하세요.")
+    s = get_settings()
+    host = s.app_host if s.app_host in ("127.0.0.1", "localhost") else "127.0.0.1"
+    project = _project(db, project_id)
+    name = project.company.name if project.company else "report"
+    code = project.company.stock_code or "" if project.company else ""
+    wk_tag = w.week_start.replace("-", "")
+    try:
+        pdf = render_pdf(f"http://{host}:{s.app_port}/print/projects/{project_id}/weekly/{weekly_id}", s.pdf_browser_path or None,
+                         footer=f"ValueScope Weekly  |  {code}  |  week of {w.week_start}  |  Not investment advice")
+    except PdfUnavailable as e:
+        raise HTTPException(503, str(e)) from e
+    safe = re.sub(r'[\\/:*?"<>|]', "", name).strip() or "report"
+    fname = f"{safe}_주간리포트_{wk_tag}.pdf"
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename=\"{code or 'report'}_weekly_{wk_tag}.pdf\"; filename*=UTF-8''{quote(fname)}",
+                             "Cache-Control": "no-store"})
+
+
 @router.get("/projects/{project_id}/weekly/{weekly_id}")
 def get_weekly(project_id: str, weekly_id: str, db: Session = Depends(get_session)):
     w = db.get(WeeklyAnalysis, weekly_id)

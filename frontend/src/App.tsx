@@ -2,6 +2,7 @@ import { Navigate, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
 import BriefReport from './pages/BriefReport'
+import WeeklyReport from './pages/WeeklyReport'
 import PrintReport from './pages/PrintReport'
 import ProjectHome from './pages/ProjectHome'
 import ProjectLayout from './pages/ProjectLayout'
@@ -15,6 +16,7 @@ export default function App() {
     <Routes>
       <Route path="print/projects/:projectId/runs/:runId" element={<PrintReport />} />
       <Route path="print/projects/:projectId/runs/:runId/brief" element={<BriefReport />} />
+      <Route path="print/projects/:projectId/weekly/:weeklyId" element={<WeeklyReport />} />
       <Route element={<Layout />}>
         <Route index element={<Dashboard />} />
         <Route path="projects/:projectId" element={<ProjectLayout />}>

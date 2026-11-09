@@ -56,6 +56,21 @@ function WeekPicker({ value, onChange, earliest, latest }: { value: string; onCh
   )
 }
 
+// ------------------------------------------------------------------ 리포트 출력
+function WeeklyPdfButtons({ run }: { run: WeeklyRun }) {
+  const pdf = useMutation({ mutationFn: () => weeklyApi.downloadPdf(run.project_id, run.id) })
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-2 text-xs">
+      <button onClick={() => pdf.mutate()} disabled={pdf.isPending}
+        className="inline-flex items-center gap-1.5 rounded-md bg-violet-700 px-3 py-1.5 font-medium text-white hover:bg-violet-600 disabled:opacity-60">
+        {pdf.isPending ? <><Spinner /> 만드는 중…</> : '주간 리포트 PDF'}
+      </button>
+      <a href={`/print/projects/${run.project_id}/weekly/${run.id}?autoprint=1`} target="_blank" rel="noreferrer" className="text-slate-500 hover:text-violet-700 hover:underline">브라우저 인쇄로 저장</a>
+      {pdf.isError && <span className="text-red-600">{(pdf.error as Error).message}</span>}
+    </div>
+  )
+}
+
 // ------------------------------------------------------------------ 결과
 function WeeklyView({ run }: { run: WeeklyRun }) {
   const { project } = useProject()
@@ -76,6 +91,7 @@ function WeeklyView({ run }: { run: WeeklyRun }) {
           {s.abnormal_days.length > 0 && <Badge tone="red">이상 변동일 {s.abnormal_days.map((d) => d.slice(5)).join(', ')}</Badge>}
         </div>
         {rep?.headline && <div className="mt-2 text-base font-semibold">{rep.headline}</div>}
+        <WeeklyPdfButtons run={run} />
         <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-6">
           <Kpi label={`${project.company.name} 주간`} value={pct(s.target_return)} tone={s.target_return >= 0 ? 'text-red-600' : 'text-blue-600'}
             sub={r.week.last_close ? `종가 ${r.week.last_close.toLocaleString()}원` : undefined} />

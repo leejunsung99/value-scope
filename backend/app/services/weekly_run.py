@@ -323,4 +323,11 @@ def to_dict(w: WeeklyAnalysis, full: bool = False) -> dict:
          "summary": (w.result or {}).get("summary"), "headline": (w.report or {}).get("headline")}
     if full:
         d.update({"messages": w.messages, "result": w.result, "report": w.report, "options": w.options})
+    project = w.project if hasattr(w, "project") else None
+    if project is None:
+        from sqlalchemy.orm import object_session
+
+        sess = object_session(w)
+        project = sess.get(Project, w.project_id) if sess else None
+    d["company_name"] = project.company.name if project and project.company else None
     return d

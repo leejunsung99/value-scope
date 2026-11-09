@@ -52,7 +52,7 @@ export interface WeeklyReport {
 }
 export interface WeeklyRun {
   id: string; project_id: string; week_start: string; week_end: string; status: 'queued' | 'running' | 'succeeded' | 'failed'
-  stage: string | null; peer_version_no: number; started_at: string; finished_at: string | null
+  stage: string | null; peer_version_no: number; started_at: string; finished_at: string | null; company_name?: string
   summary?: WeeklySummary | null; headline?: string | null
   messages?: { level: string; message: string }[]; result?: WeeklyResult; report?: WeeklyReport; options?: { include_news?: boolean }
 }
@@ -61,6 +61,20 @@ export const weeklyApi = {
   range: (pid: string) => fetch(`/api/projects/${pid}/weekly/range`).then((r) => json<{ earliest: string; latest: string; today: string }>(r)),
   list: (pid: string) => fetch(`/api/projects/${pid}/weekly`).then((r) => json<WeeklyRun[]>(r)),
   get: (pid: string, id: string) => fetch(`/api/projects/${pid}/weekly/${id}`).then((r) => json<WeeklyRun>(r)),
+  /** 주간 리포트 PDF 다운로드 (서버에서 로컬 Edge/Chrome으로 변환) */
+  downloadPdf: async (pid: string, id: string) => {
+    const res = await fetch(`/api/projects/${pid}/weekly/${id}/report.pdf`)
+    if (!res.ok) await json(res)
+    const blob = await res.blob()
+    const m = /filename\*=UTF-8''([^;]+)/.exec(res.headers.get('Content-Disposition') ?? '')
+    const a = document.createElement('a')
+    a.href = URL.createObjectURL(blob)
+    a.download = m ? decodeURIComponent(m[1]) : 'weekly_report.pdf'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    setTimeout(() => URL.revokeObjectURL(a.href), 10_000)
+  },
   start: (pid: string, weekStart: string, includeNews: boolean) =>
     fetch(`/api/projects/${pid}/weekly`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ week_start: weekStart, include_news: includeNews }),
