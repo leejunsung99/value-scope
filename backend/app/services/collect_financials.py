@@ -21,17 +21,28 @@ from app.services.dart import DartClient, DartError, DartNoData
 REPORTS = [("11013", 1, "1분기"), ("11012", 2, "반기"), ("11014", 3, "3분기"), ("11011", 4, "사업")]
 QUARTER_END = {1: "03-31", 2: "06-30", 3: "09-30", 4: "12-31"}
 FILING_LAG_DAYS = {1: 50, 2: 50, 3: 50, 4: 95}  # 법정 제출기한 근사
-YEARS_BACK = 4
+YEARS_BACK = 6  # 정상화(12분기)·자사 과거 평가에 필요한 이력
 
 FLOW_METRICS = {
     "revenue": (("IS", "CIS"), ["ifrs-full_Revenue"], ["매출액", "수익(매출액)", "영업수익", "매출", "매출액(수익)"]),
     "operating_income": (("IS", "CIS"), ["dart_OperatingIncomeLoss"], ["영업이익(손실)", "영업이익", "영업손실"]),
     "net_income": (("IS", "CIS"), ["ifrs-full_ProfitLoss"], ["당기순이익(손실)", "당기순이익", "당기순손실", "분기순이익(손실)", "반기순이익(손실)"]),
     "net_income_owners": (("IS", "CIS"), ["ifrs-full_ProfitLossAttributableToOwnersOfParent"], []),
+    "pbt": (("IS", "CIS"), ["ifrs-full_ProfitLossBeforeTax"], ["법인세비용차감전순이익(손실)", "법인세차감전순이익", "법인세비용차감전순이익"]),
+    "income_tax": (("IS", "CIS"), ["ifrs-full_IncomeTaxExpenseContinuingOperation"], ["법인세비용(수익)", "법인세비용", "법인세수익(비용)"]),
+    "finance_income": (("IS", "CIS"), ["ifrs-full_FinanceIncome", "ifrs-full_OtherFinanceIncome"], ["금융수익", "기타금융수익"]),
+    "finance_costs": (("IS", "CIS"), ["ifrs-full_FinanceCosts", "ifrs-full_OtherFinanceCost"], ["금융원가", "금융비용", "기타금융원가"]),
+    "other_gains": (("IS", "CIS"), ["dart_OtherGains"], ["기타수익", "기타이익", "기타영업외수익"]),
+    "other_losses": (("IS", "CIS"), ["dart_OtherLosses"], ["기타비용", "기타손실", "기타영업외비용"]),
 }
 CF_METRICS = {
     "operating_cash_flow": (("CF",), ["ifrs-full_CashFlowsFromUsedInOperatingActivities"], ["영업활동현금흐름", "영업활동으로 인한 현금흐름"]),
+    "interest_paid": (("CF",), ["ifrs-full_InterestPaidClassifiedAsOperatingActivities", "ifrs-full_InterestPaidClassifiedAsFinancingActivities"],
+                      ["이자지급", "이자의 지급", "이자지급(영업)", "이자의지급"]),
+    "interest_received": (("CF",), ["ifrs-full_InterestReceivedClassifiedAsOperatingActivities", "ifrs-full_InterestReceivedClassifiedAsInvestingActivities"],
+                          ["이자수취", "이자의 수취", "이자의수취"]),
 }
+ABS_METRICS = {"interest_paid", "interest_received"}  # 현금흐름표 표시 부호가 회사마다 달라 절대값 사용
 POINT_METRICS = {
     "total_assets": (("BS",), ["ifrs-full_Assets"], ["자산총계"]),
     "total_liabilities": (("BS",), ["ifrs-full_Liabilities"], ["부채총계"]),
@@ -206,6 +217,8 @@ def normalize(db: Session, company: Company) -> list[dict]:
                     src = "; ".join(items)
                 else:
                     v, src = _pick(rep.rows, sj, ids, names, "thstrm_amount")
+                if v is not None and m in ABS_METRICS:
+                    v = abs(v)
                 if v is not None:
                     ytd[q] = (v, rep, src or "")
             for q in sorted(ytd):

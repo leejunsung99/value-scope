@@ -159,19 +159,20 @@ export function MarketCapChart({ charts }: { charts: Charts }) {
 }
 
 // ------------------------------------------------------------------ 4. multiples (grouped bars, one chart per multiple)
-export function MultiplesChart({ charts, metric, label }: { charts: Charts; metric: 'per' | 'ev_ebit' | 'ev_ebitda' | 'pbr'; label: string }) {
+export function MultiplesChart({ charts, metric, label }: { charts: Charts; metric: 'per' | 'ev_ebit' | 'ev_ebitda' | 'pbr' | 'per_adj' | 'ev_ebit_norm' | 'pe_norm'; label: string }) {
   const dark = useDark()
   const colors = colorMap(charts.companies, dark)
   const rows = charts.multiples ?? []
   const valid = rows.filter((r) => r[metric] != null)
   const missing = rows.filter((r) => r[metric] == null)
+  const val = (r: (typeof rows)[number]) => r[metric] as number
   const b = base(dark)
   const option = {
     ...b, legend: { show: false }, grid: { ...b.grid, top: 16 },
     tooltip: { ...b.tooltip, trigger: 'item', formatter: (p: { name: string; value: number }) => `${p.name}<br/>${label} ${p.value.toFixed(1)}배` },
     xAxis: { ...b.xAxis, type: 'category', data: valid.map((r) => r.name), axisLabel: { color: theme(dark).text, interval: 0, rotate: valid.length > 6 ? 30 : 0 } },
     yAxis: { ...b.yAxis, type: 'value', axisLabel: { color: theme(dark).text, formatter: '{value}x' } },
-    series: [{ type: 'bar', barMaxWidth: 28, data: valid.map((r) => ({ value: r[metric], itemStyle: { color: colors[r.id], borderRadius: [4, 4, 0, 0] } })),
+    series: [{ type: 'bar', barMaxWidth: 28, data: valid.map((r) => ({ value: val(r), itemStyle: { color: colors[r.id], borderRadius: [4, 4, 0, 0] } })),
       label: { show: true, position: 'top', color: theme(dark).text, formatter: (p: { value: number }) => p.value.toFixed(1) }}],
   }
   return (

@@ -154,6 +154,49 @@ def compute_metrics(fs: FinSeries, px: dict, shares: dict | None, ev: Evidence, 
             e["roe"] = ev.add("calc", f"{c.name} ROE(TTM)", v["roe"], "ratio", fmt_pct(v["roe"]), period=f"TTM {lq[:7]}",
                               as_of=lq, company=c, method="지배순이익(TTM) ÷ 평균 지배주주지분", source="OpenDART 재무제표")
 
+    # ---- 1) 경상순이익(TTM) · 2) 정상화 이익
+    if lq is not None:
+        from app.services.normalize import core_earnings, normalized
+
+        ce = core_earnings(fs, lq)
+        if ce:
+            v.update({k: ce[k] for k in ce if k != "tax_note"})
+            v["tax_note"] = ce["tax_note"]
+            e["tax_rate"] = ev.add("calc", f"{c.name} 적용 세율", ce["tax_rate"], "ratio", fmt_pct(ce["tax_rate"]), as_of=lq, company=c,
+                                   method=ce["tax_note"], source="OpenDART 재무제표")
+            e["core_ni_ttm"] = ev.add("calc", f"{c.name} 경상순이익(TTM)", ce["core_ni_ttm"], "KRW", fmt_krw(ce["core_ni_ttm"]),
+                                      period=f"TTM {lq[:7]}", as_of=lq, company=c,
+                                      method=f"(영업이익 {fmt_krw(v.get('operating_income_ttm'))} + 이자수취 {fmt_krw(ce['interest_received_ttm'])}"
+                                             f" − 이자지급 {fmt_krw(ce['interest_paid_ttm'])}) × (1 − 세율 {ce['tax_rate']:.1%})",
+                                      source="OpenDART 재무제표(손익계산서·현금흐름표)", impact="일회성·평가성 영업외 손익을 제외한 이익 기준",
+                                      detail={k: ce[k] for k in ("interest_received_ttm", "interest_paid_ttm", "tax_rate")})
+            if ce.get("non_recurring_gap") is not None:
+                e["non_recurring_gap"] = ev.add(
+                    "calc", f"{c.name} 영업외 비경상 손익(TTM, 세후 근사)", ce["non_recurring_gap"], "KRW", fmt_krw(ce["non_recurring_gap"]),
+                    period=f"TTM {lq[:7]}", as_of=lq, company=c,
+                    method=f"지배순이익 {fmt_krw(ce['reported_ni_ttm'])} − 경상순이익 {fmt_krw(ce['core_ni_ttm'])}. "
+                           f"영업외 내역(TTM): 금융수익 {fmt_krw(ce.get('finance_income_ttm'))}, 금융원가 {fmt_krw(ce.get('finance_costs_ttm'))}, "
+                           f"기타수익 {fmt_krw(ce.get('other_gains_ttm'))}, 기타비용 {fmt_krw(ce.get('other_losses_ttm'))}, "
+                           f"세전 영업외손익 {fmt_krw(ce.get('non_operating_ttm'))}",
+                    source="OpenDART 재무제표", impact="보고 PER과 조정 PER의 차이 원인",
+                    detail={k: ce.get(k) for k in ("finance_income_ttm", "finance_costs_ttm", "other_gains_ttm", "other_losses_ttm",
+                                                   "non_operating_ttm", "reported_ni_ttm")})
+        nm = normalized(fs, lq)
+        if nm:
+            v.update({k: nm[k] for k in ("ebit_norm", "revenue_norm", "margin_norm", "ni_core_norm", "net_interest_norm")})
+            v["norm_window"] = nm["window"]
+            e["ebit_norm"] = ev.add("calc", f"{c.name} 정상 EBIT(12개 분기 평균)", nm["ebit_norm"], "KRW", fmt_krw(nm["ebit_norm"]),
+                                    period=nm["window"], as_of=lq, company=c, method="최근 12개 분기 영업이익 합 ÷ 3 (수주 사이클 평균)",
+                                    source="OpenDART 재무제표", impact="상대·과거 평가의 이익 기준")
+            e["margin_norm"] = ev.add("calc", f"{c.name} 영업이익률(12개 분기 평균)", nm["margin_norm"], "ratio", fmt_pct(nm["margin_norm"]),
+                                      period=nm["window"], as_of=lq, company=c, method="12개 분기 영업이익 합 ÷ 12개 분기 매출 합",
+                                      source="OpenDART 재무제표")
+            e["ni_core_norm"] = ev.add("calc", f"{c.name} 정상 순이익", nm["ni_core_norm"], "KRW", fmt_krw(nm["ni_core_norm"]),
+                                       period=nm["window"], as_of=lq, company=c,
+                                       method="(정상 EBIT + 연평균 순이자) × (1 − 적용 세율)", source="OpenDART 재무제표")
+        else:
+            na["ebit_norm"] = "12개 분기 재무 이력 부족 — 정상화 이익 산출 불가"
+
     # ---- market data
     if px.get("price"):
         v["price"], v["market_cap"], v["listed_shares"], v["price_date"] = px["price"], px["mcap"], px["listed_shares"], px["date"]
@@ -205,6 +248,9 @@ def compute_metrics(fs: FinSeries, px: dict, shares: dict | None, ev: Evidence, 
         else:
             na["ev_ebitda"] = "공시 현금흐름표에서 감가상각비 계정을 확인하지 못해 EBITDA 산출 불가"
         mult("ev_sales", ev_val, v.get("revenue_ttm"), "EV/Sales(TTM)", "매출 없음")
+        mult("per_adj", mc, v.get("core_ni_ttm"), "조정 PER(경상순이익 TTM)", "TTM 경상순이익 적자")
+        mult("ev_ebit_norm", ev_val, v.get("ebit_norm"), "EV/정상EBIT", "정상 EBIT 0 이하 또는 12개 분기 이력 부족")
+        mult("pe_norm", mc, v.get("ni_core_norm"), "정상 P/E", "정상 순이익 0 이하 또는 12개 분기 이력 부족")
     na["forward_per"] = "신뢰 가능한 공식 전망치(컨센서스)를 확보하지 않아 미산출"
     return m
 
@@ -244,7 +290,7 @@ def method_peer(target: CompanyMetrics, peers: list[CompanyMetrics], ev: Evidenc
     mv = target.values
     res = {"method": "peer", "label": METHOD_LABEL["peer"], "available": False, "scenarios": {}, "notes": [], "inputs": []}
     used = []
-    plans = [("ev_ebit", "operating_income_ttm", "EV/EBIT", True), ("per", "net_income_owners_ttm", "PER", False)]
+    plans = [("ev_ebit_norm", "ebit_norm", "EV/정상EBIT", True), ("pe_norm", "ni_core_norm", "정상 P/E", False)]
     fallback = [("ev_sales", "revenue_ttm", "EV/Sales", True), ("pbr", "equity_owners", "PBR", False)]
     for group, is_fallback in ((plans, False), (fallback, True)):
         for key, base_key, label, is_ev in group:
@@ -291,7 +337,7 @@ def method_peer(target: CompanyMetrics, peers: list[CompanyMetrics], ev: Evidenc
     res["peer_count"] = max(len(u["peers"]) for u in used)
     b = res["scenarios"]["base"]["per_share"]
     res["eid"] = ev.add("estimate", f"{target.name} 동종업계 상대평가 주당가치(기준)", b, "KRW/주", f"{b:,.0f}원" if b else "N/A",
-                        company=None, method="; ".join(f"{u['multiple']} 비교기업 중앙값 {u['quantiles']['base']:.1f}배 × 고객사 기준지표" for u in used)
+                        company=None, method="; ".join(f"{u['multiple']} 비교기업 중앙값 {u['quantiles']['base']:.1f}배 × 고객사 기준지표(정상화 이익)" for u in used)
                         + " → EV에서 순차입금·비지배지분 차감 → 유통주식수로 나눔 (복수 배수는 평균)"
                         + ("".join(f" | 제외: {n}" for n in res["notes"]) if res["notes"] else ""),
                         source="ValueScope 계산", impact="동종업계 대비 적정가치 기준점",
@@ -300,29 +346,31 @@ def method_peer(target: CompanyMetrics, peers: list[CompanyMetrics], ev: Evidenc
 
 
 def method_history(target: CompanyMetrics, fs: FinSeries, monthly_caps: pd.Series, ev: Evidence) -> dict:
-    """monthly_caps: market cap at month-end sample dates (index Timestamp)."""
+    """자사 과거 월말 EV/정상EBIT·정상 P/E·PBR 분포. 각 시점에는 그때까지 공시된 실적만 사용(미래정보 미사용)."""
+    from app.services.normalize import normalized
+
     mv = target.values
     res = {"method": "history", "label": METHOD_LABEL["history"], "available": False, "scenarios": {}, "notes": [], "observations": {}}
-    obs = {"ev_ebit": [], "per": [], "pbr": []}
+    obs = {"ev_ebit_norm": [], "pe_norm": [], "pbr": []}
     for d, cap in monthly_caps.items():
         filed_by = d.strftime("%Y%m%d")
         lq = fs.latest_quarter(filed_by)
         if not lq:
             continue
-        op, ni = fs.ttm("operating_income", lq, filed_by), fs.ttm("net_income_owners", lq, filed_by) or fs.ttm("net_income", lq, filed_by)
+        nrm = normalized(fs, lq, filed_by)
         debt, cash = fs.pt("total_debt", lq), fs.pt("cash", lq)
         sti = fs.pt("short_term_investments", lq) or 0.0
         te, eo = fs.pt("total_equity", lq), fs.pt("equity_owners", lq)
         minority = (te - eo) if te is not None and eo is not None else 0.0
-        if op and op > 0 and debt is not None and cash is not None:
-            obs["ev_ebit"].append({"date": str(d.date()), "value": (cap + debt - cash - sti + minority) / op, "quarter": lq})
-        if ni and ni > 0:
-            obs["per"].append({"date": str(d.date()), "value": cap / ni, "quarter": lq})
+        if nrm.get("ebit_norm") and nrm["ebit_norm"] > 0 and debt is not None and cash is not None:
+            obs["ev_ebit_norm"].append({"date": str(d.date()), "value": (cap + debt - cash - sti + minority) / nrm["ebit_norm"], "quarter": lq})
+        if nrm.get("ni_core_norm") and nrm["ni_core_norm"] > 0:
+            obs["pe_norm"].append({"date": str(d.date()), "value": cap / nrm["ni_core_norm"], "quarter": lq})
         bv = eo if eo is not None else te
         if bv and bv > 0:
             obs["pbr"].append({"date": str(d.date()), "value": cap / bv, "quarter": lq})
     used = []
-    for key, base_key, label, is_ev in [("ev_ebit", "operating_income_ttm", "EV/EBIT", True), ("per", "net_income_owners_ttm", "PER", False),
+    for key, base_key, label, is_ev in [("ev_ebit_norm", "ebit_norm", "EV/정상EBIT", True), ("pe_norm", "ni_core_norm", "정상 P/E", False),
                                         ("pbr", "equity_owners", "PBR", False)]:
         vals = [o["value"] for o in obs[key]]
         res["observations"][key] = obs[key]
@@ -336,8 +384,7 @@ def method_history(target: CompanyMetrics, fs: FinSeries, monthly_caps: pd.Serie
         qs = _quantiles(vals)
         dsp = dispersion(qs)
         if dsp is None or dsp > MAX_MULTIPLE_DISPERSION:
-            res["notes"].append(f"{label}: 과거 {len(vals)}개 관측 분산 과대(상위/하위 {dsp or 0:.1f}배, 범위 {min(vals):.1f}~{max(vals):.1f}배)"
-                                f" — 과거 이익 규모가 현재와 크게 달라 비교 근거에서 제외")
+            res["notes"].append(f"{label}: 과거 {len(vals)}개 관측 분산 과대(상위/하위 {dsp or 0:.1f}배, 범위 {min(vals):.1f}~{max(vals):.1f}배) → 제외")
             res.setdefault("excluded", []).append({"multiple": label, "quantiles": qs, "dispersion": dsp, "range": [min(vals), max(vals)], "n": len(vals)})
             continue
         per = {}
@@ -361,7 +408,7 @@ def method_history(target: CompanyMetrics, fs: FinSeries, monthly_caps: pd.Serie
     b = res["scenarios"]["base"]["per_share"]
     res["eid"] = ev.add("estimate", f"{target.name} 자사 과거 밸류에이션 기준 주당가치(기준)", b, "KRW/주", f"{b:,.0f}원" if b else "N/A",
                         method="; ".join(f"과거 {u['n']}개 월말 {u['multiple']} 중앙값 {u['quantiles']['base']:.1f}배(범위 {u['range'][0]:.1f}~{u['range'][1]:.1f}배)" for u in used)
-                        + " × 현재 TTM 기준지표 (각 시점 공시 완료된 실적만 사용)"
+                        + " × 현재 기준지표(정상화 이익·자본) (각 시점 공시 완료된 실적만 사용)"
                         + ("".join(f" | 제외: {n}" for n in res["notes"]) if res["notes"] else ""),
                         source="ValueScope 계산 (KRX 시가총액·OpenDART 재무)", impact="자사 역사적 평가 수준 대비 현재 위치",
                         detail={"inputs": [{k: u[k] for k in ("multiple", "n", "quantiles", "range")} for u in used],
@@ -369,51 +416,46 @@ def method_history(target: CompanyMetrics, fs: FinSeries, monthly_caps: pd.Serie
     return res
 
 
-def method_forward(target: CompanyMetrics, fs: FinSeries, backlog: dict, peer_res: dict, hist_res: dict, ev: Evidence) -> dict:
+def method_forward(target: CompanyMetrics, fs: FinSeries, schedule: dict, peer_res: dict, hist_res: dict, ev: Evidence) -> dict:
+    """A. 납기 기반 향후 12개월 매출 × 이익률 시나리오 × EV/정상EBIT(비교기업 중앙값, 고정)."""
     mv = target.values
     res = {"method": "forward", "label": METHOD_LABEL["forward"], "available": False, "scenarios": {}, "notes": [], "assumptions": {}}
-    b_amt, b_src = backlog.get("amount"), backlog.get("source_label")
-    if not b_amt or b_amt <= 0:
-        res["notes"].append("확인 가능한 수주잔고 금액이 없어 미래이익 기반 평가 불가")
+    if not schedule or not schedule.get("available"):
+        res["notes"].append(schedule.get("reason") if schedule else "수주잔고 납기 정보 없음")
         return res
-    annual_opm = {}
-    rev_a, op_a = fs.annual("revenue"), fs.annual("operating_income")
-    for y in sorted(rev_a)[-3:]:
-        if rev_a.get(y) and op_a.get(y) is not None:
-            annual_opm[y] = op_a[y] / rev_a[y]
-    if not annual_opm:
-        res["notes"].append("연간 영업이익률 이력이 없어 미래이익 기반 평가 불가")
+    m3, ttm = mv.get("margin_norm"), mv.get("op_margin")
+    if m3 is None:
+        res["notes"].append("12개 분기 이익률 이력이 없어 미래이익 기반 평가 불가")
         return res
-    if mv.get("op_margin") is not None:
-        annual_opm["TTM"] = mv["op_margin"]
-    opm_vals = sorted(annual_opm.values())
-    opm = {"conservative": opm_vals[0], "base": statistics.median(opm_vals), "optimistic": opm_vals[-1]}
+    lo, hi = (min(m3, ttm), max(m3, ttm)) if ttm is not None else (m3, m3)
+    opm = {"conservative": lo, "base": m3, "optimistic": hi}
     mult_src = None
     for src in (peer_res, hist_res):
-        comp = next((u for u in src.get("inputs", []) if u["key"] == "ev_ebit"), None)
+        comp = next((u for u in src.get("inputs", []) if u["key"] == "ev_ebit_norm"), None)
         if comp:
-            mult_src = (src["label"], comp["quantiles"])
+            mult_src = (src["label"] + " EV/정상EBIT", comp["quantiles"])
             break
     if not mult_src:
-        exc = next((x for x in peer_res.get("excluded", []) if x["multiple"] == "EV/EBIT" and len(x.get("peers", [])) >= 2), None)
+        exc = next((x for x in peer_res.get("excluded", []) if x["multiple"] == "EV/정상EBIT" and len(x.get("peers", [])) >= 2), None)
         if exc:
-            mult_src = ("B. 동종업계 상대평가 (분산 큰 EV/EBIT의 중앙값)", exc["quantiles"])
+            mult_src = ("B. 비교기업 EV/정상EBIT 중앙값(분산 큼)", exc["quantiles"])
             res["fallback"] = True
-            res["notes"].append(f"비교기업 EV/EBIT 분산이 커(상위/하위 {exc['dispersion'] or 0:.1f}배) 중앙값 {exc['quantiles']['base']:.1f}배만 사용 — 가중치·신뢰도 하향")
+            res["notes"].append(f"비교기업 EV/정상EBIT 분산이 커(상위/하위 {exc['dispersion'] or 0:.1f}배) 중앙값 {exc['quantiles']['base']:.1f}배만 사용 — 가중치·신뢰도 하향")
         else:
-            res["notes"].append("적용할 EV/EBIT 배수(비교기업·자사 과거)가 없어 미래이익 기반 평가 불가")
+            res["notes"].append("적용할 EV/정상EBIT 배수(비교기업·자사 과거)가 없어 미래이익 기반 평가 불가")
             return res
+    m_base = mult_src[1]["base"]
     res["available"] = True
     res["assumptions"] = {
-        "backlog": b_amt, "backlog_source": b_src, "backlog_as_of": backlog.get("as_of"),
-        "conversion": BACKLOG_CONVERSION, "op_margin": opm, "op_margin_history": annual_opm,
-        "multiple_source": mult_src[0], "multiples": mult_src[1],
-        "undisclosed_contracts": backlog.get("undisclosed_active", 0),
+        "backlog": schedule["official_backlog"], "backlog_source": "정기보고서 수주상황 표", "backlog_as_of": schedule["as_of"],
+        "forward_revenue": {s: schedule["scenarios"][s]["revenue"] for s in SCENARIOS}, "recognition_rule": schedule["rule"],
+        "op_margin": opm, "op_margin_basis": "보수 min(3년 평균, TTM) · 기준 3년(12분기) 평균 · 낙관 max",
+        "multiple_source": mult_src[0], "multiple": m_base, "multiples": mult_src[1],
+        "undisclosed_contracts": schedule["undisclosed_contracts"], "undisclosed_pool": schedule["undisclosed_pool"],
     }
     for s in SCENARIOS:
-        rev = b_amt * BACKLOG_CONVERSION[s]
+        rev = schedule["scenarios"][s]["revenue"]
         ebit = rev * opm[s]
-        m_base = mult_src[1]["base"]  # 배수는 기준값 고정 — 영업가정·배수 극단값을 곱해 범위가 과대해지는 것을 방지
         if ebit > 0:
             evv = ebit * m_base
             eq = _equity_from_ev(evv, mv)
@@ -421,52 +463,58 @@ def method_forward(target: CompanyMetrics, fs: FinSeries, backlog: dict, peer_re
             evv, eq = None, max(0.0, -(mv.get("net_debt") or 0.0) - (mv.get("minority_interest") or 0.0))
         res["scenarios"][s] = {"forward_revenue": rev, "forward_ebit": ebit, "multiple": m_base, "enterprise_value": evv,
                                "equity_value": eq, "per_share": _per_share(eq, mv)}
-    if backlog.get("undisclosed_active"):
-        res["notes"].append(f"금액 비공개(공시 유보) 진행 계약 {backlog['undisclosed_active']}건은 잔고에 포함되지 않아 하한 추정일 수 있음")
+    res["notes"].extend(schedule.get("notes", []))
     b = res["scenarios"]["base"]
-    res["eid"] = ev.add("estimate", f"{target.name} 미래이익(수주) 기반 주당가치(기준)", b["per_share"], "KRW/주",
+    res["eid"] = ev.add("estimate", f"{target.name} 미래이익(수주 납기) 기반 주당가치(기준)", b["per_share"], "KRW/주",
                         f"{b['per_share']:,.0f}원" if b["per_share"] else "N/A",
-                        method=f"수주잔고 {fmt_krw(b_amt)}({b_src}) × 12개월 매출전환 {BACKLOG_CONVERSION['base']:.0%} × 영업이익률 {opm['base']:.1%}"
-                               f"(최근 연간 중앙값) × EV/EBIT {mult_src[1]['base']:.1f}배({mult_src[0]}) → 지분가치 → 주당가치",
-                        source="ValueScope 추정(명시적 가정)", impact="수주 기반 향후 이익 반영",
+                        method=f"향후 12개월 납기 도래 수주잔고 {fmt_krw(b['forward_revenue'])} × 영업이익률 {opm['base']:.1%}(12분기 평균)"
+                               f" × EV/정상EBIT {m_base:.1f}배({mult_src[0]}) − 순차입금 − 비지배지분 → 주당가치",
+                        source="ValueScope 추정(명시적 가정)", impact="수주 납기 기반 향후 이익 반영",
                         detail={"assumptions": res["assumptions"]})
     return res
 
 
+RECOVER = {
+    "forward": "정기보고서 수주상황 표(수주총액−기납품액=수주잔고 검증)와 계약 납기 정보가 확보되면 회복",
+    "peer": "적정가치 비교용 상장 비교기업이 정상화 이익 흑자로 2개 이상, 배수 분산 3배 이내이면 회복",
+    "history": "12개 분기 이상 재무 이력과 흑자 기간이 쌓이고 과거 배수 분산이 3배 이내이면 회복",
+}
+
+
 def combine(methods: list[dict], price: float | None, peer_count: int, earnings_unstable: bool,
-            undisclosed: int, ev: Evidence, target_name: str) -> dict:
+            undisclosed: int, ev: Evidence, target_name: str, official_backlog: bool = False) -> dict:
     avail = [m for m in methods if m.get("available") and all(m["scenarios"].get(s, {}).get("per_share") for s in SCENARIOS)]
     breakdown, conf = [], 100.0
 
-    def deduct(points, reason):
+    def deduct(points, reason, recover):
         nonlocal conf
         conf -= points
-        breakdown.append({"points": -points, "reason": reason})
+        breakdown.append({"points": -points, "reason": reason, "recover": recover})
 
     for m in methods:
         if not m.get("available"):
-            deduct(15, f"{m['label']} 적용 불가: {' / '.join(m.get('notes', [])) or '데이터 부족'}")
+            deduct(15, f"{m['label']} 적용 불가: {' / '.join(m.get('notes', [])[:2]) or '데이터 부족'}", RECOVER.get(m["method"], ""))
         elif m.get("fallback"):
-            deduct(10, f"{m['label']}: 이익배수 대신 매출·자산배수 사용")
+            deduct(10, f"{m['label']}: 분산이 큰 배수의 중앙값 또는 대체 배수 사용", "비교기업 배수 분산이 3배 이내가 되도록 비교군 재구성")
     if peer_count < 3:
-        deduct(15, f"유효 비교기업 수 {peer_count}개(3개 미만)")
+        deduct(15, f"유효 비교기업 수 {peer_count}개(3개 미만)", "적정가치 비교용 상장 비교기업 추가")
     if earnings_unstable:
-        deduct(15, "최근 4개 분기 중 2개 분기 이상 영업적자 — 실적 불안정")
+        deduct(10, "최근 4개 분기 중 2개 분기 이상 영업적자 — 단기 실적 불안정(정상화 이익으로 일부 보완)",
+               "흑자 분기 누적 시 회복")
     if undisclosed:
-        deduct(10, f"금액 비공개 진행 계약 {undisclosed}건 — 수주 규모 불확실")
+        if official_backlog:
+            deduct(5, f"금액 비공개 진행 계약 {undisclosed}건 — 잔고 총액은 정기보고서로 확인되나 계약별 금액·납기 배분은 가정",
+                   "유보기한 이후 계약금액이 공시되면 회복")
+        else:
+            deduct(10, f"금액 비공개 진행 계약 {undisclosed}건 — 수주 규모 불확실", "정기보고서 수주잔고 확보 또는 계약금액 공시 시 회복")
     out = {"available_methods": [m["method"] for m in avail], "weights": {}, "scenarios": {}}
     if avail:
         bases = [m["scenarios"]["base"]["per_share"] for m in avail]
         if len(bases) >= 2 and min(bases) > 0:
             out["method_dispersion"] = max(bases) / min(bases)
-            if out["method_dispersion"] > 2:
-                deduct(15, f"평가 방법 간 기준값 차이 {out['method_dispersion']:.1f}배 — 결과 분산 큼")
         weights = {}
         for m in avail:
-            w = METHOD_WEIGHT[m["method"]] * (0.5 if m.get("fallback") else 1.0)
-            if m["method"] == "forward" and m["assumptions"].get("undisclosed_contracts"):
-                w *= 0.5
-            weights[m["method"]] = w
+            weights[m["method"]] = METHOD_WEIGHT[m["method"]] * (0.5 if m.get("fallback") else 1.0)
         tot = sum(weights.values())
         out["weights"] = {k: w / tot for k, w in weights.items()}
         for s in SCENARIOS:
@@ -477,8 +525,15 @@ def combine(methods: list[dict], price: float | None, peer_count: int, earnings_
         env_hi = max(m["scenarios"]["optimistic"]["per_share"] for m in avail)
         out["envelope"] = {"low": env_lo, "high": env_hi}
         out["range_ratio"] = env_hi / env_lo if env_lo > 0 else None
-        if out["range_ratio"] is None or out["range_ratio"] > 2.0:
-            deduct(15, f"적정주가 범위 과대(낙관/보수 {out['range_ratio'] or 0:.1f}배)")
+        # 결과 분산은 한 번만 감점 (방법 간 기준값 차이가 주 지표, 단일 방법이면 범위 폭)
+        md = out.get("method_dispersion")
+        if md is not None:
+            if md > 4:
+                deduct(25, f"평가 방법 간 기준값 차이 {md:.1f}배(4배 초과)", "방법 간 기준값 차이가 2배 이내가 되면 회복")
+            elif md > 2:
+                deduct(15, f"평가 방법 간 기준값 차이 {md:.1f}배(2배 초과)", "방법 간 기준값 차이가 2배 이내가 되면 회복")
+        elif out["range_ratio"] is None or out["range_ratio"] > MAX_RANGE_RATIO:
+            deduct(10, f"적정주가 범위 과대(낙관/보수 {out['range_ratio'] or 0:.1f}배)", "시나리오 가정의 불확실성이 줄면 회복")
     conf = max(0.0, min(100.0, conf))
     out["confidence"] = conf
     out["confidence_breakdown"] = breakdown
@@ -492,8 +547,8 @@ def combine(methods: list[dict], price: float | None, peer_count: int, earnings_
                   "방법 간 결론이 불일치해 단일 판단을 내리지 않음")
     elif conf < 40:
         reason = f"분석 신뢰도 {conf:.0f}점(40점 미만)"
-    elif out.get("range_ratio") is None or out["range_ratio"] > MAX_RANGE_RATIO:
-        reason = f"적정주가 범위가 너무 넓음(낙관/보수 {out.get('range_ratio') or 0:.1f}배 > {MAX_RANGE_RATIO:.0f}배)"
+    elif out.get("range_ratio") is None or out["range_ratio"] > MAX_RANGE_RATIO * 2:
+        reason = f"적정주가 범위가 너무 넓음(낙관/보수 {out.get('range_ratio') or 0:.1f}배)"
     elif price:
         s = out["scenarios"]
         if price < s["conservative"]:
@@ -516,11 +571,9 @@ def combine(methods: list[dict], price: float | None, peer_count: int, earnings_
                             detail={"scenarios": s, "weights": out["weights"], "envelope": out.get("envelope"),
                                     "method_dispersion": out.get("method_dispersion"),
                                     "methods": {m["method"]: {k: m["scenarios"][k]["per_share"] for k in SCENARIOS} for m in avail}})
-    bases = [m["scenarios"]["base"]["per_share"] for m in avail]
     out["confidence_eid"] = ev.add("calc", f"{target_name} 분석 신뢰도", conf, "점", f"{conf:.0f}점/100", method="100점에서 감점: " + "; ".join(
         f"{b['reason']}({b['points']})" for b in breakdown) if breakdown else "감점 없음", source="ValueScope 규칙",
-        detail={"breakdown": breakdown, "range_ratio": out.get("range_ratio"),
-                "method_dispersion": (max(bases) / min(bases)) if len(bases) >= 2 and min(bases) > 0 else None})
+        detail={"breakdown": breakdown, "range_ratio": out.get("range_ratio"), "method_dispersion": out.get("method_dispersion")})
     return out
 
 

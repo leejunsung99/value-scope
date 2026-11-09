@@ -118,7 +118,11 @@ def test_combine_verdict_rules():
     out = eng.combine(methods[:1] + methods[2:], price=100, peer_count=4, earnings_unstable=False, undisclosed=0, ev=ev, target_name="T")
     assert out["verdict"] == "판단 유보" and "2개 미만" in out["verdict_reason"]
     out = eng.combine(methods, price=100, peer_count=1, earnings_unstable=True, undisclosed=2, ev=ev, target_name="T")
-    assert out["confidence"] == 100 - 15 - 15 - 15 - 10  # forward N/A, peers<3, unstable, undisclosed
+    assert out["confidence"] == 100 - 15 - 15 - 10 - 10  # forward N/A, peers<3, unstable, undisclosed(no official backlog)
+    out = eng.combine(methods, price=100, peer_count=1, earnings_unstable=True, undisclosed=2, ev=ev, target_name="T",
+                      official_backlog=True)
+    assert out["confidence"] == 100 - 15 - 15 - 10 - 5  # official backlog confirms the total -> milder
+    assert all(b.get("recover") for b in out["confidence_breakdown"])
     wide = [mk("peer", 10, 20, 30), mk("history", 90, 110, 130), methods[2]]
     out = eng.combine(wide, price=100, peer_count=1, earnings_unstable=True, undisclosed=2, ev=ev, target_name="T")
     assert out["confidence"] < 40 and out["verdict"] == "판단 유보"  # + method dispersion > 2x
@@ -126,9 +130,9 @@ def test_combine_verdict_rules():
 
 def test_peer_method_uses_quantiles_and_adjustments():
     ev = eng.Evidence()
-    t = eng.CompanyMetrics(1, "T", values={"operating_income_ttm": 100.0, "net_income_owners_ttm": 80.0, "net_debt": -50.0,
+    t = eng.CompanyMetrics(1, "T", values={"ebit_norm": 100.0, "ni_core_norm": 80.0, "net_debt": -50.0,
                                            "minority_interest": 10.0, "shares_out": 10.0})
-    peers = [eng.CompanyMetrics(i, f"P{i}", values={"ev_ebit": x, "per": x + 2}) for i, x in enumerate([5.0, 7.0, 9.0], start=2)]
+    peers = [eng.CompanyMetrics(i, f"P{i}", values={"ev_ebit_norm": x, "pe_norm": x + 2}) for i, x in enumerate([5.0, 7.0, 9.0], start=2)]
     r = eng.method_peer(t, peers, ev)
     assert r["available"] and r["peer_count"] == 3
     evb = 7.0 * 100  # median EV/EBIT x EBIT

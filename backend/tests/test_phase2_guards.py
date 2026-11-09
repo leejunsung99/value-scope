@@ -7,13 +7,13 @@ from app.services.report import INVEST_ADVICE, known_values
 
 def test_peer_multiple_with_excessive_dispersion_is_excluded():
     ev = eng.Evidence()
-    t = eng.CompanyMetrics(1, "T", values={"operating_income_ttm": 100.0, "net_income_owners_ttm": 80.0, "net_debt": 0.0,
+    t = eng.CompanyMetrics(1, "T", values={"ebit_norm": 100.0, "ni_core_norm": 80.0, "net_debt": 0.0,
                                            "minority_interest": 0.0, "shares_out": 10.0})
-    # EV/EBIT 2.8 / 3.1 / 18.0 -> max/min 6.4x > 3 -> excluded; PER 4/7/11 -> kept
-    peers = [eng.CompanyMetrics(i, f"P{i}", values={"ev_ebit": a, "per": b})
+    # EV/정상EBIT 2.8 / 3.1 / 18.0 -> max/min 6.4x > 3 -> excluded; 정상 P/E 4/7/11 -> kept
+    peers = [eng.CompanyMetrics(i, f"P{i}", values={"ev_ebit_norm": a, "pe_norm": b})
              for i, (a, b) in enumerate([(2.8, 4.0), (3.1, 7.0), (18.0, 11.0)], start=2)]
     r = eng.method_peer(t, peers, ev)
-    assert [u["multiple"] for u in r["inputs"]] == ["PER"]
+    assert [u["multiple"] for u in r["inputs"]] == ["정상 P/E"]
     assert any("분산 과대" in n for n in r["notes"])
     assert r["scenarios"]["base"]["per_share"] == pytest.approx(7.0 * 80 / 10)
 
@@ -29,16 +29,17 @@ def test_wide_combined_range_means_hold_judgement():
 
 def test_forward_keeps_multiple_fixed_across_scenarios():
     ev = eng.Evidence()
-
-    class FS:
-        def annual(self, k):
-            return {"revenue": {"2023": 100, "2024": 100, "2025": 100}, "operating_income": {"2023": 5, "2024": 10, "2025": 20}}[k]
-
-    t = eng.CompanyMetrics(1, "T", values={"net_debt": 0.0, "minority_interest": 0.0, "shares_out": 1.0})
-    peer = {"label": "B", "inputs": [{"key": "ev_ebit", "quantiles": {"conservative": 2.0, "base": 5.0, "optimistic": 20.0}}]}
-    r = eng.method_forward(t, FS(), {"amount": 1000.0, "source_label": "x"}, peer, {}, ev)
+    t = eng.CompanyMetrics(1, "T", values={"net_debt": 0.0, "minority_interest": 0.0, "shares_out": 1.0,
+                                           "margin_norm": 0.10, "op_margin": 0.20})
+    peer = {"label": "B", "inputs": [{"key": "ev_ebit_norm", "quantiles": {"conservative": 2.0, "base": 5.0, "optimistic": 20.0}}]}
+    sched = {"available": True, "official_backlog": 3000.0, "as_of": "2026-06-30", "rule": "r", "undisclosed_contracts": 0,
+             "undisclosed_pool": 0.0, "notes": [],
+             "scenarios": {"conservative": {"revenue": 500.0}, "base": {"revenue": 1000.0}, "optimistic": {"revenue": 1500.0}}}
+    r = eng.method_forward(t, None, sched, peer, {}, ev)
     assert {r["scenarios"][s]["multiple"] for s in eng.SCENARIOS} == {5.0}
-    assert r["scenarios"]["optimistic"]["per_share"] == pytest.approx(1000 * 0.9 * 0.2 * 5.0)
+    assert r["scenarios"]["conservative"]["per_share"] == pytest.approx(500 * 0.10 * 5.0)  # min(3y, TTM) margin
+    assert r["scenarios"]["base"]["per_share"] == pytest.approx(1000 * 0.10 * 5.0)  # 3y average margin
+    assert r["scenarios"]["optimistic"]["per_share"] == pytest.approx(1500 * 0.20 * 5.0)
 
 
 def test_invest_advice_and_sign_flip():

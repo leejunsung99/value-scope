@@ -72,7 +72,7 @@ export interface MethodResult {
   notes: string[]
   scenarios: Record<string, { per_share: number | null; forward_revenue?: number; forward_ebit?: number; multiple?: number }>
   inputs?: MethodInput[]
-  assumptions?: { backlog?: number; backlog_source?: string; backlog_as_of?: string; conversion?: Record<Scenario, number>; op_margin?: Record<Scenario, number>; op_margin_history?: Record<string, number>; multiple_source?: string; multiples?: Record<Scenario, number>; undisclosed_contracts?: number }
+  assumptions?: { backlog?: number; backlog_source?: string; backlog_as_of?: string; forward_revenue?: Record<Scenario, number>; recognition_rule?: string; op_margin?: Record<Scenario, number>; op_margin_basis?: string; multiple_source?: string; multiple?: number; multiples?: Record<Scenario, number>; undisclosed_contracts?: number; undisclosed_pool?: number }
   eid?: string
   peer_count?: number
   fallback?: boolean
@@ -94,6 +94,12 @@ export interface ContractRow {
   amount: number | null; amount_disclosed: boolean; withheld_until: string | null; status: string; remaining_estimate: number | null
   filings: number; latest_rcept_no: string; latest_url: string; first_filed: string; sales_ratio: number | null
 }
+export interface Schedule {
+  available: boolean; reason?: string; as_of?: string; official_backlog?: number; disclosed_remaining?: number; undisclosed_pool?: number
+  undisclosed_contracts?: number; horizon?: string[]; rule?: string; notes?: string[]; lumpiness?: number | null; eid?: string
+  scenarios?: Record<Scenario, { revenue: number; recognized_before_today: number }>
+  pieces?: { label: string; amount: number; end: string | null; disclosed: boolean; rcept_no: string | null; contract_date: string | null; end_assumed?: boolean }[]
+}
 export interface QuarterRow { period: string; revenue: number | null; operating_income: number | null; net_income: number | null; op_margin: number | null; rcept_no: string }
 export interface ValuationResult {
   company_id: number
@@ -108,10 +114,11 @@ export interface ValuationResult {
   fair_value: { scenarios?: ScenarioMap; envelope?: { low: number; high: number }; method_dispersion?: number; range_ratio?: number; weights?: Record<string, number>; verdict?: string; verdict_reason?: string | null; upside_base?: number; eid?: string; confidence_eid?: string }
   metrics: { values: Record<string, number | string | null>; na: Record<string, string>; eids: Record<string, string>; quarters: QuarterRow[]; annual: Record<string, Record<string, number>>; splits: unknown[] }
   methods?: Partial<Record<'forward' | 'peer' | 'history', MethodResult>>
-  confidence_breakdown?: { points: number; reason: string }[]
+  confidence_breakdown?: { points: number; reason: string; recover?: string }[]
   attribution?: Attribution
   data_status?: {
     backlog?: { amount: number | null; source_label: string; as_of: string; undisclosed_active: number; eid?: string; official?: { quote: string; check: string; url: string; title: string } } | null
+    schedule?: Schedule | null
     contracts?: { contracts: ContractRow[]; filings_total: number; contracts_total: number; duplicates_merged: number; active_count: number; undisclosed_active: number; backlog_estimate: number }
   }
   scenarios?: { method: string; scenario: Scenario; multiple_name: string | null; multiple: number | null; per_share: number | null }[]
@@ -132,7 +139,7 @@ export interface Charts {
   market_index?: { label: string; points: [string, number][] }
   excess_return?: [string, number][]
   market_caps?: { id: number; name: string; value: number | null }[]
-  multiples?: { id: number; name: string; per: number | null; pbr: number | null; psr: number | null; ev_ebit: number | null; ev_ebitda: number | null; na: Record<string, string | null> }[]
+  multiples?: { id: number; name: string; per: number | null; pbr: number | null; psr: number | null; ev_ebit: number | null; ev_ebitda: number | null; per_adj?: number | null; ev_ebit_norm?: number | null; pe_norm?: number | null; na: Record<string, string | null> }[]
   scenarios?: Record<string, ScenarioMap | null>
   forward?: Record<Scenario, { forward_revenue: number; forward_ebit: number }>
   contracts_monthly?: [string, number][]

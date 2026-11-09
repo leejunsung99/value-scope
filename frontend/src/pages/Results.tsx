@@ -89,10 +89,10 @@ function MethodCard({ m }: { m?: MethodResult }) {
       ))}
       {m.assumptions?.backlog && (
         <div className="mt-2 space-y-0.5 text-slate-600 dark:text-slate-400">
-          <div>수주잔고 {krw(m.assumptions.backlog)} ({m.assumptions.backlog_source}, {m.assumptions.backlog_as_of})</div>
-          <div>12개월 매출 전환율 가정: {Object.entries(m.assumptions.conversion ?? {}).map(([k, v]) => `${SCENARIO_LABEL[k as 'base']} ${pct(v, 0)}`).join(' · ')}</div>
-          <div>영업이익률 가정: {Object.entries(m.assumptions.op_margin ?? {}).map(([k, v]) => `${SCENARIO_LABEL[k as 'base']} ${pct(v)}`).join(' · ')} (최근 연간 {Object.entries(m.assumptions.op_margin_history ?? {}).map(([y, v]) => `${y} ${pct(v)}`).join(', ')})</div>
-          <div>EV/EBIT: {m.assumptions.multiple_source}</div>
+          <div>공식 수주잔고 {krw(m.assumptions.backlog)} ({m.assumptions.backlog_as_of})</div>
+          <div>향후 12개월 납기 도래 매출: {Object.entries(m.assumptions.forward_revenue ?? {}).map(([k, v]) => `${SCENARIO_LABEL[k as 'base']} ${krw(v)}`).join(' · ')}</div>
+          <div>영업이익률: {Object.entries(m.assumptions.op_margin ?? {}).map(([k, v]) => `${SCENARIO_LABEL[k as 'base']} ${pct(v)}`).join(' · ')} ({m.assumptions.op_margin_basis})</div>
+          <div>EV/정상EBIT {m.assumptions.multiple?.toFixed(1)}배 — {m.assumptions.multiple_source}</div>
         </div>
       )}
       {m.notes.map((n, i) => <div key={i} className="mt-1 text-amber-700 dark:text-amber-400">· {n}</div>)}
@@ -170,6 +170,72 @@ export function ContractsTable({ v }: { v: ValuationResult }) {
   )
 }
 
+export function EarningsAdjustment({ v }: { v: ValuationResult }) {
+  const m = v.metrics.values as Record<string, number | null | undefined>
+  const e = v.metrics.eids
+  if (m.core_ni_ttm == null && m.ebit_norm == null) return null
+  const row = (label: string, value: string, eid?: string, sub?: string) => (
+    <tr><td className="py-1 text-slate-500">{label}</td><td className="tabular text-right font-medium">{eid ? <EvidenceLink ids={[eid]}>{value}</EvidenceLink> : value}</td><td className="pl-3 text-[11px] text-slate-500">{sub}</td></tr>
+  )
+  return (
+    <Section title={`${v.name} 이익 조정 내역 — 보고 이익 vs 경상·정상화 이익`}>
+      <div className="grid gap-6 md:grid-cols-2">
+        <table className="w-full text-xs">
+          <thead><tr><th colSpan={3} className="pb-1 text-left text-[11px] font-semibold">① 경상순이익 (최근 4개 분기)</th></tr></thead>
+          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+            {row('영업이익', krw(m.operating_income_ttm), e.operating_income_ttm)}
+            {row('+ 이자수취 − 이자지급', krw(m.net_interest_ttm), undefined, '현금흐름표')}
+            {row('× (1 − 세율)', pct(m.tax_rate), e.tax_rate)}
+            {row('= 경상순이익', krw(m.core_ni_ttm), e.core_ni_ttm)}
+            {row('보고 지배순이익', krw(m.reported_ni_ttm))}
+            {row('영업외 비경상 손익(차이)', krw(m.non_recurring_gap), e.non_recurring_gap, `금융수익 ${krw(m.finance_income_ttm)} · 금융원가 ${krw(m.finance_costs_ttm)}`)}
+            {row('PER 보고 → 조정', `${mult(m.per)} → ${mult(m.per_adj)}`)}
+          </tbody>
+        </table>
+        <table className="w-full text-xs">
+          <thead><tr><th colSpan={3} className="pb-1 text-left text-[11px] font-semibold">② 정상화 이익 (12개 분기 평균{m.norm_window ? ` · ${m.norm_window}` : ''})</th></tr></thead>
+          <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+            {row('정상 EBIT (연평균 영업이익)', krw(m.ebit_norm), e.ebit_norm)}
+            {row('12분기 영업이익률', pct(m.margin_norm), e.margin_norm, `TTM ${pct(m.op_margin)}`)}
+            {row('정상 순이익', krw(m.ni_core_norm), e.ni_core_norm)}
+            {row('EV/EBIT TTM → 정상', `${mult(m.ev_ebit)} → ${mult(m.ev_ebit_norm)}`)}
+            {row('정상 P/E', mult(m.pe_norm))}
+          </tbody>
+        </table>
+      </div>
+      {v.metrics.na?.ebit_norm && <div className="mt-1 text-[11px] text-amber-700">{v.metrics.na.ebit_norm}</div>}
+    </Section>
+  )
+}
+
+export function ScheduleTable({ v }: { v: ValuationResult | null }) {
+  const s = v?.data_status?.schedule
+  if (!s) return null
+  if (!s.available) return <div className="text-xs text-slate-500">납기 기반 추정 불가: {s.reason}</div>
+  return (
+    <div className="mt-2 text-xs">
+      <div className="mb-1 text-slate-600 dark:text-slate-400">
+        공식 수주잔고 {krw(s.official_backlog)}({s.as_of}) = 공시 계약 잔여 {krw(s.disclosed_remaining)} + 금액 비공개 {krw(s.undisclosed_pool)}
+        (비공개 계약 {s.undisclosed_contracts}건 균등 배분) · 기간 {s.horizon?.join(' ~ ')}
+        {s.lumpiness != null && <> · 분기 매출 변동계수 {s.lumpiness.toFixed(2)} (납품 시점 인식 근거)</>}
+        {s.eid && <> · <EvidenceLink ids={[s.eid]}>근거</EvidenceLink></>}
+      </div>
+      <div className="mb-1 flex gap-3">{(['conservative', 'base', 'optimistic'] as const).map((k) => <span key={k}>{SCENARIO_LABEL[k]} <b className="tabular">{krw(s.scenarios?.[k].revenue)}</b></span>)}</div>
+      <table className="w-full">
+        <thead className="text-left text-[11px] text-slate-500"><tr><th className="py-1">계약</th><th>계약일</th><th>납기</th><th className="text-right">잔고(추정)</th><th>금액</th></tr></thead>
+        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+          {s.pieces?.map((p, i) => (
+            <tr key={i}><td className="max-w-[220px] truncate py-0.5" title={p.label}>{p.label}</td><td className="tabular">{p.contract_date ?? '—'}</td>
+              <td className="tabular">{p.end ?? '—'}{p.end_assumed && ' (가정)'}</td><td className="tabular text-right">{krw(p.amount)}</td>
+              <td>{p.disclosed ? <Badge tone="green">공시</Badge> : <Badge tone="amber">비공개·배분</Badge>}</td></tr>
+          ))}
+        </tbody>
+      </table>
+      {s.notes?.map((n, i) => <div key={i} className="mt-1 text-[11px] text-slate-500">· {n}</div>)}
+    </div>
+  )
+}
+
 function useLatestRun() {
   const [sp] = useSearchParams()
   const { project } = useProject()
@@ -231,7 +297,14 @@ function Dashboard({ r, projectId }: { r: Results; projectId: string }) {
           </div>
         )}
         {!!t?.confidence_breakdown?.length && (
-          <div className="mt-3 text-[11px] text-slate-500">신뢰도 감점: {t.confidence_breakdown.map((b) => `${b.reason} (${b.points})`).join(' · ')}</div>
+          <table className="mt-3 w-full text-[11px]">
+            <thead className="text-left text-slate-500"><tr><th className="w-10 py-0.5">감점</th><th>사유</th><th>회복 조건</th></tr></thead>
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              {t.confidence_breakdown.map((b, i) => (
+                <tr key={i}><td className="tabular py-0.5 text-red-600">{b.points}</td><td className="pr-3">{b.reason}</td><td className="text-slate-500">{b.recover ?? '—'}</td></tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </Card>
 
@@ -250,10 +323,13 @@ function Dashboard({ r, projectId }: { r: Results; projectId: string }) {
         </Section>
       </div>
 
-      {r.charts.forward && (
-        <Section title="예상 실적 시나리오 (수주잔고 기반, 향후 12개월)">
-          <ForwardChart forward={r.charts.forward} />
-          <div className="text-[11px] text-slate-500">추정치 — 수주잔고 × 매출전환율 × 영업이익률 가정. 공식 전망치가 아닙니다.</div>
+      {t && <EarningsAdjustment v={t} />}
+
+      {(r.charts.forward || t?.data_status?.schedule) && (
+        <Section title="예상 실적 시나리오 (수주잔고 납기 기반, 향후 12개월)">
+          {r.charts.forward && <ForwardChart forward={r.charts.forward} />}
+          <ScheduleTable v={t} />
+          <div className="text-[11px] text-slate-500">추정치 — 공식 전망치가 아닙니다. 매출은 납기(계약 종료일)에 인식된다고 가정했습니다.</div>
         </Section>
       )}
 
@@ -275,11 +351,11 @@ function Dashboard({ r, projectId }: { r: Results; projectId: string }) {
       {/* ---------------- 동종업계 */}
       <div className="grid gap-4 xl:grid-cols-2">
         <Section title="기업별 시가총액 비교"><MarketCapChart charts={r.charts} /></Section>
-        <Section title="밸류에이션 배수 비교 (TTM)">
+        <Section title="밸류에이션 배수 비교 (정상화·조정 기준)">
           <div className="grid gap-3 md:grid-cols-2">
-            <MultiplesChart charts={r.charts} metric="per" label="PER" />
-            <MultiplesChart charts={r.charts} metric="ev_ebit" label="EV/EBIT" />
-            <MultiplesChart charts={r.charts} metric="ev_ebitda" label="EV/EBITDA" />
+            <MultiplesChart charts={r.charts} metric="ev_ebit_norm" label="EV/정상EBIT (12분기 평균)" />
+            <MultiplesChart charts={r.charts} metric="pe_norm" label="정상 P/E" />
+            <MultiplesChart charts={r.charts} metric="per_adj" label="조정 PER (경상순이익 TTM)" />
             <MultiplesChart charts={r.charts} metric="pbr" label="PBR" />
           </div>
         </Section>
@@ -350,7 +426,7 @@ function PeerTable({ r, projectId }: { r: Results; projectId: string }) {
     <div className="overflow-x-auto">
       <table className="tabular w-full text-xs">
         <thead className="text-left text-[11px] text-slate-500">
-          <tr><th className="py-1">기업</th><th>구분</th><th className="text-right">시가총액</th><th className="text-right">매출(TTM)</th><th className="text-right">영업이익(TTM)</th><th className="text-right">OPM</th><th className="text-right">매출성장</th><th className="text-right">PER</th><th className="text-right">PBR</th><th className="text-right">EV/EBIT</th><th className="text-right">ROE</th><th className="text-right">1Y 수익률</th><th>평가</th></tr>
+          <tr><th className="py-1">기업</th><th>구분</th><th className="text-right">시가총액</th><th className="text-right">매출(TTM)</th><th className="text-right">영업이익(TTM)</th><th className="text-right">OPM</th><th className="text-right">매출성장</th><th className="text-right">PER(보고)</th><th className="text-right">조정 PER</th><th className="text-right">EV/정상EBIT</th><th className="text-right">정상 P/E</th><th className="text-right">PBR</th><th className="text-right">ROE</th><th className="text-right">1Y 수익률</th><th>평가</th></tr>
         </thead>
         <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
           {rows.map((c) => (
@@ -366,8 +442,10 @@ function PeerTable({ r, projectId }: { r: Results; projectId: string }) {
               <td className="text-right">{pct(val(c, 'op_margin'))}</td>
               <td className="text-right">{pct(val(c, 'revenue_growth'))}</td>
               <td className="text-right" title={c.metrics.na?.per}>{mult(val(c, 'per'))}</td>
+              <td className="text-right" title={c.metrics.na?.per_adj}>{mult(val(c, 'per_adj'))}</td>
+              <td className="text-right" title={c.metrics.na?.ev_ebit_norm}>{mult(val(c, 'ev_ebit_norm'))}</td>
+              <td className="text-right" title={c.metrics.na?.pe_norm}>{mult(val(c, 'pe_norm'))}</td>
               <td className="text-right">{mult(val(c, 'pbr'))}</td>
-              <td className="text-right" title={c.metrics.na?.ev_ebit}>{mult(val(c, 'ev_ebit'))}</td>
               <td className="text-right">{pct(val(c, 'roe'))}</td>
               <td className="text-right">{pct(val(c, 'ret_1Y'))}</td>
               <td>{c.verdict ? <Badge tone={VERDICT_TONE[c.verdict] ?? 'slate'}>{c.verdict}</Badge> : <span className="text-slate-400">—</span>}</td>
@@ -439,7 +517,8 @@ export function CompanyDetail() {
           <Section title="적정가치 분석 (같은 계산 엔진)">
             <div className="grid gap-2 md:grid-cols-3"><MethodCard m={v.methods.forward} /><MethodCard m={v.methods.peer} /><MethodCard m={v.methods.history} /></div>
             {v.fair_value?.scenarios && <div className="mt-2 text-sm">가중 결합 적정주가: <EvidenceLink ids={[v.fair_value.eid]}>{won(v.fair_value.scenarios.conservative)} ~ {won(v.fair_value.scenarios.optimistic)} (기준 {won(v.fair_value.scenarios.base)})</EvidenceLink></div>}
-            {!!v.confidence_breakdown?.length && <div className="mt-1 text-[11px] text-slate-500">평가 근거·신뢰도 감점: {v.confidence_breakdown.map((b) => `${b.reason} (${b.points})`).join(' · ')}</div>}
+            {!!v.confidence_breakdown?.length && <div className="mt-1 text-[11px] text-slate-500">평가 근거·신뢰도 감점: {v.confidence_breakdown.map((b) => `${b.reason} (${b.points})${b.recover ? ` → 회복: ${b.recover}` : ''}`).join(' · ')}</div>}
+            <EarningsAdjustment v={v} />
           </Section>
         )}
         <Section title="수주 현황"><ContractsTable v={v} /></Section>

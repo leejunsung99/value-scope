@@ -174,6 +174,20 @@ def collect_contracts(db: Session, dart: DartClient, company: Company, texts: di
                 log.warning("contract doc %s failed: %s", d.rcept_no, e)
                 continue
         p = parse_contract(text, d.report_nm)
+        if source == "DART_MONITOR" and not (p.get("contract_date") or p.get("counterparty") or p.get("amount")):
+            # 공시알람 DB 원문은 줄바꿈 없이 저장된 경우가 있어 표 구조 파싱이 안 됨 → DART 원문으로 재파싱
+            try:
+                text = xml_to_text(dart.document_markup(d.rcept_no))
+                stats["dart_docs"] += 1
+                source = "DART"
+                p = parse_contract(text, d.report_nm)
+            except DartError as e:
+                stats["errors"] += 1
+                log.warning("contract doc %s failed: %s", d.rcept_no, e)
+                continue
+        if not (p.get("contract_date") or p.get("counterparty") or p.get("amount")):
+            stats["errors"] += 1
+            log.warning("contract %s could not be parsed", d.rcept_no)
         db.add(ContractOrder(company_id=company.id, rcept_no=d.rcept_no, report_nm=d.report_nm, filed_date=d.rcept_dt,
                              source=source, url=d.url, **p))
         stats["new"] += 1

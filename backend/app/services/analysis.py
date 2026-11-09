@@ -26,6 +26,7 @@ from app.services.collect_prices import KrxClient, KrxError, collect_prices
 from app.services.dart import DartClient, DartError
 from app.services.engine_data import FinSeries, adjusted_returns, cumulative, load_prices, market_proxy, window_return
 from app.services.monitor_source import MonitorSource
+from app.services.normalize import forward_schedule, revenue_lumpiness
 from app.services.report import generate_report
 
 log = logging.getLogger(__name__)
@@ -248,7 +249,24 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
                                        eng.fmt_krw(book["backlog_estimate"]), as_of=today.isoformat(), company=c,
                                        method="진행 중 계약금액 × 잔여기간 비율(정정 반영, 이행완료·해지 제외)", source="OpenDART 수주공시",
                                        impact="미래이익(수주) 기반 평가의 기초(추정)")
-            backlog_info[c.id] = {"book": book, "backlog": bl}
+            # 3) 납기 기반 향후 12개월 매출 (정기보고서 수주잔고 + 계약 공시 납기)
+            sched = forward_schedule(book, ob, today) if ob else {"available": False,
+                                                                 "reason": "산식 검증된 정기보고서 수주잔고가 없어 납기 기반 추정 불가"}
+            if sched.get("available"):
+                lump = revenue_lumpiness(fs_map[c.id], fs_map[c.id].latest_quarter() or "")
+                sched["lumpiness"] = lump
+                sb = sched["scenarios"]["base"]["revenue"]
+                sched["eid"] = ev.add(
+                    "estimate", f"{c.name} 향후 12개월 납기 도래 수주잔고(기준)", sb, "KRW", eng.fmt_krw(sb),
+                    period=f"{sched['horizon'][0]} ~ {sched['horizon'][1]}", as_of=sched["as_of"], company=c,
+                    method=(f"공식 수주잔고 {eng.fmt_krw(sched['official_backlog'])}({sched['as_of']}) 중 납기가 향후 12개월에 드는 금액. "
+                            f"공시 계약 잔여액 {eng.fmt_krw(sched['disclosed_remaining'])}, 비공개 잔고 {eng.fmt_krw(sched['undisclosed_pool'])}"
+                            f"(비공개 계약 {sched['undisclosed_contracts']}건 균등 배분). {sched['rule']}. "
+                            f"시나리오: 보수 {eng.fmt_krw(sched['scenarios']['conservative']['revenue'])} · 낙관 {eng.fmt_krw(sched['scenarios']['optimistic']['revenue'])}"
+                            + (f". 납품 시점 인식 근거: 최근 8개 분기 매출 변동계수 {lump:.2f}" if lump is not None else "")),
+                    source="OpenDART 정기보고서·수주공시", impact="미래이익(수주) 기반 평가의 매출 가정",
+                    detail={"scenarios": sched["scenarios"], "pieces": sched["pieces"][:30], "lumpiness": lump})
+            backlog_info[c.id] = {"book": book, "backlog": bl, "schedule": sched}
             peer_res = eng.method_peer(cm[c.id], comps, ev)
             hist_res = {"method": "history", "label": eng.METHOD_LABEL["history"], "available": False, "notes": ["시세 이력 없음"], "scenarios": {}}
             if c.id in series:
@@ -257,11 +275,11 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
                 month_ends.index = month_ends.index.to_timestamp("M")
                 month_ends = month_ends[month_ends.index < latest_date - pd.Timedelta(days=20)]
                 hist_res = eng.method_history(cm[c.id], fs_map[c.id], month_ends, ev)
-            fwd_res = eng.method_forward(cm[c.id], fs_map[c.id], bl, peer_res, hist_res, ev)
+            fwd_res = eng.method_forward(cm[c.id], fs_map[c.id], sched, peer_res, hist_res, ev)
             recent_q = fs_map[c.id].quarters("operating_income")[-4:]
             unstable = sum(1 for q in recent_q if (fs_map[c.id].qval("operating_income", q) or 0) < 0) >= 2
             comb = eng.combine([fwd_res, peer_res, hist_res], cm[c.id].values.get("price"), peer_res.get("peer_count", 0),
-                               unstable, bl.get("undisclosed_active", 0), ev, c.name)
+                               unstable, book["undisclosed_active"], ev, c.name, official_backlog=bool(ob))
             valuations[c.id] = {"forward": fwd_res, "peer": peer_res, "history": hist_res, "combined": comb, "unstable": unstable}
             rl.step(c.id, "valuation", "done", f"{comb['verdict']} · 신뢰도 {comb['confidence']:.0f}")
 
@@ -321,7 +339,11 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
                    "methods": {k: {"available": tv[k]["available"], "notes": tv[k].get("notes"),
                                    "base": tv[k]["scenarios"].get("base", {}).get("per_share") if tv[k].get("scenarios") else None}
                                for k in ("forward", "peer", "history")} if tv else {},
+                   "earnings_adjustment": {k: tm.values.get(k) for k in ("core_ni_ttm", "non_recurring_gap", "per_adj", "ebit_norm",
+                                                                         "ni_core_norm", "ev_ebit_norm", "pe_norm", "margin_norm")},
                    "peers": [{"name": cm[i].name, "per": cm[i].values.get("per"), "ev_ebit": cm[i].values.get("ev_ebit"),
+                              "per_adj": cm[i].values.get("per_adj"), "ev_ebit_norm": cm[i].values.get("ev_ebit_norm"),
+                              "pe_norm": cm[i].values.get("pe_norm"),
                               "op_margin": cm[i].values.get("op_margin"), "revenue_growth": cm[i].values.get("revenue_growth")}
                              for i in val_peer_ids],
                    "attribution": {k: v for k, v in ta.items() if k in ("windows", "model", "abnormal_days")} if ta.get("available") else None,
@@ -361,6 +383,7 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
                             confidence_breakdown=v["combined"]["confidence_breakdown"] if v else [],
                             attribution=clean(attributions.get(c.id, {})),
                             data_status=clean({"backlog": backlog_info.get(c.id, {}).get("backlog"),
+                                         "schedule": backlog_info.get(c.id, {}).get("schedule"),
                                          "contracts": backlog_info.get(c.id, {}).get("book") or cd.contract_book(db, c.id, today),
                                          "progress": run.progress.get("companies", {}).get(str(c.id), {})}))
             db.add(val)
@@ -437,8 +460,9 @@ def build_charts(companies, target, cm, series, proxies, latest_date, valuations
             ex = (t / t[t.index >= since].iloc[0]) / (m / m[m.index >= since].iloc[0]) * 100 - 100
             charts["excess_return"] = [[d.strftime("%Y-%m-%d"), round(float(v), 2)] for d, v in ex[ex.index >= since].items() if pd.notna(v)]
     charts["market_caps"] = [{"id": c.id, "name": c.name, "value": cm[c.id].values.get("market_cap")} for c in companies]
-    charts["multiples"] = [{"id": c.id, "name": c.name, **{k: cm[c.id].values.get(k) for k in ("per", "pbr", "psr", "ev_ebit", "ev_ebitda")},
-                            "na": {k: cm[c.id].na.get(k) for k in ("per", "ev_ebit", "ev_ebitda")}} for c in companies]
+    keys = ("per", "pbr", "psr", "ev_ebit", "ev_ebitda", "per_adj", "ev_ebit_norm", "pe_norm")
+    charts["multiples"] = [{"id": c.id, "name": c.name, **{k: cm[c.id].values.get(k) for k in keys},
+                            "na": {k: cm[c.id].na.get(k) for k in keys}} for c in companies]
     tv = valuations.get(target.id)
     if tv:
         charts["scenarios"] = {mk: {s: (tv[mk]["scenarios"].get(s) or {}).get("per_share") for s in eng.SCENARIOS}

@@ -49,7 +49,10 @@ def parse_backlog(text: str) -> dict | None:
     validated = len(vals) == 3 and vals[0] > 0 and abs(vals[0] - vals[1] - vals[2]) <= max(1.0, vals[0] * 0.01)
     if not validated:
         return None
+    dates = re.findall(r"(\d{4})\.(\d{2})\.(\d{2})", sec)
+    last_delivery = max((f"{y}-{m}-{d}" for y, m, d in dates), default=None)
     return {"amount": vals[-1] * mult, "amount_text": raw, "unit": unit_txt, "quote": quote, "row_tokens": tokens,
+            "last_delivery": last_delivery,
             "order_total": vals[0] * mult, "delivered": vals[1] * mult,
             "check": f"수주총액 {nums[0]} − 기납품액 {nums[1]} = 수주잔고 {nums[2]} ({unit_txt})"}
 
