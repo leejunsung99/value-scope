@@ -2,7 +2,7 @@
 
 1) 경상순이익(TTM)  = (영업이익 + 이자수취 − 이자지급) × (1 − 유효세율)
    영업외 비경상 손익 = 지배순이익 − 경상순이익  (금융수익·금융원가·기타손익 내역을 함께 제시)
-2) 정상 EBIT       = 최근 12개 분기 영업이익 합 ÷ 3   (수주형 업종의 사이클 평균)
+2) 정상 EBIT       = 최근 20개 분기(5년) 영업이익 합 ÷ 5   (수주형 업종의 사이클 평균; 이력이 짧으면 12~19개 분기)
    정상 순이익      = (정상 EBIT + 연평균 순이자) × (1 − 유효세율)
 3) 향후 12개월 매출 = 납기(계약 종료일)가 [기준일, 기준일+12개월]에 속하는 수주잔고의 합
    - 장비 매출은 납품·검수 시점에 몰려 인식된다고 가정(분기 매출 변동성으로 근거 제시)
@@ -18,7 +18,8 @@ from datetime import date, timedelta
 from app.services.engine_data import FinSeries, prev_quarter
 
 DEFAULT_TAX = 0.22
-NORMAL_QUARTERS = 12
+NORMAL_QUARTERS = 20  # 5년
+MIN_QUARTERS = 12     # 최소 3년
 SHIFT_DAYS = {"conservative": 182, "base": 0, "optimistic": -91}
 
 
@@ -42,14 +43,26 @@ def sum_q_lenient(fs: FinSeries, metric: str, pe: str, n: int, filed_by: str | N
     return tot
 
 
+def available_quarters(fs: FinSeries, metric: str, pe: str, filed_by: str | None = None, max_n: int = NORMAL_QUARTERS) -> int:
+    """pe부터 거슬러 올라가며 연속으로 값이 있는 분기 수 (최대 max_n)."""
+    n = 0
+    for k in range(max_n):
+        r = fs.q.get(metric, {}).get(prev_quarter(pe, k))
+        if r is None or r.value is None or (filed_by and r.filed_date > filed_by):
+            break
+        n += 1
+    return n
+
+
 def tax_rate(fs: FinSeries, pe: str, filed_by: str | None = None) -> tuple[float, str]:
-    pbt = sum_q(fs, "pbt", pe, NORMAL_QUARTERS, filed_by)
-    tax = sum_q(fs, "income_tax", pe, NORMAL_QUARTERS, filed_by)
+    n = max(4, min(available_quarters(fs, "pbt", pe, filed_by), available_quarters(fs, "income_tax", pe, filed_by)))
+    pbt = sum_q(fs, "pbt", pe, n, filed_by)
+    tax = sum_q(fs, "income_tax", pe, n, filed_by)
     if pbt and pbt > 0 and tax is not None:
         r = tax / pbt
         if 0.05 <= r <= 0.35:
-            return r, f"최근 12개 분기 법인세 {tax:,.0f} ÷ 세전이익 {pbt:,.0f} = {r:.1%}"
-        return DEFAULT_TAX, f"최근 12개 분기 유효세율 {r:.1%}가 5~35% 범위 밖 → 법정세율 근사 {DEFAULT_TAX:.0%} 사용"
+            return r, f"최근 {n}개 분기 법인세 {tax:,.0f} ÷ 세전이익 {pbt:,.0f} = {r:.1%}"
+        return DEFAULT_TAX, f"최근 {n}개 분기 유효세율 {r:.1%}가 5~35% 범위 밖 → 법정세율 근사 {DEFAULT_TAX:.0%} 사용"
     return DEFAULT_TAX, f"세전이익 누계가 0 이하이거나 법인세 데이터 없음 → 법정세율 근사 {DEFAULT_TAX:.0%} 사용"
 
 
@@ -75,18 +88,21 @@ def core_earnings(fs: FinSeries, pe: str, filed_by: str | None = None) -> dict:
     return out
 
 
-def normalized(fs: FinSeries, pe: str, filed_by: str | None = None) -> dict:
-    op12 = sum_q(fs, "operating_income", pe, NORMAL_QUARTERS, filed_by)
-    rev12 = sum_q(fs, "revenue", pe, NORMAL_QUARTERS, filed_by)
-    if op12 is None or rev12 is None:
+def normalized(fs: FinSeries, pe: str, filed_by: str | None = None, max_quarters: int = NORMAL_QUARTERS) -> dict:
+    """정상화 이익: 최근 최대 20개 분기(5년) 평균. 이력이 12개 분기 미만이면 산출하지 않는다."""
+    n = min(available_quarters(fs, "operating_income", pe, filed_by, max_quarters),
+            available_quarters(fs, "revenue", pe, filed_by, max_quarters))
+    if n < MIN_QUARTERS:
         return {}
+    years = n / 4
+    op_n = sum_q(fs, "operating_income", pe, n, filed_by)
+    rev_n = sum_q(fs, "revenue", pe, n, filed_by)
     t, _ = tax_rate(fs, pe, filed_by)
-    ni_int = (sum_q_lenient(fs, "interest_received", pe, NORMAL_QUARTERS, filed_by)
-              - sum_q_lenient(fs, "interest_paid", pe, NORMAL_QUARTERS, filed_by)) / 3
-    ebit_n = op12 / 3
-    return {"ebit_norm": ebit_n, "revenue_norm": rev12 / 3, "margin_norm": op12 / rev12 if rev12 else None,
-            "ni_core_norm": (ebit_n + ni_int) * (1 - t), "net_interest_norm": ni_int,
-            "window": f"{prev_quarter(pe, NORMAL_QUARTERS - 1)[:7]}~{pe[:7]}"}
+    ni_int = (sum_q_lenient(fs, "interest_received", pe, n, filed_by) - sum_q_lenient(fs, "interest_paid", pe, n, filed_by)) / years
+    ebit_n = op_n / years
+    return {"ebit_norm": ebit_n, "revenue_norm": rev_n / years, "margin_norm": op_n / rev_n if rev_n else None,
+            "ni_core_norm": (ebit_n + ni_int) * (1 - t), "net_interest_norm": ni_int, "quarters": n,
+            "window": f"{prev_quarter(pe, n - 1)[:7]}~{pe[:7]} ({n}개 분기)"}
 
 
 def revenue_lumpiness(fs: FinSeries, pe: str, n: int = 8) -> float | None:

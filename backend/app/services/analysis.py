@@ -217,6 +217,14 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
 
         # ---- valuation for target + listed valuation peers
         val_peer_ids = [cid for cid, m in members.items() if m.use_type == "valuation" and cm[cid].values.get("market_cap")]
+        # 비교군 가중치 = STEP 1 적합성 점수(없으면 50) × 활용 구분(적정가치 비교용 1.0, 산업 참고용 0.5). 기술 경쟁용(비상장)은 제외.
+        USE_W = {"valuation": 1.0, "industry_reference": 0.5}
+        peer_universe = []
+        for cid, m in members.items():
+            if m.use_type in USE_W and cm[cid].values.get("market_cap"):
+                cm[cid].weight = round(((m.score if m.score is not None else 50.0) / 100.0) * USE_W[m.use_type], 4)
+                peer_universe.append(cid)
+        cm[target.id].weight = 1.0
         valuations: dict[int, dict] = {}
         backlog_info: dict[int, dict] = {}
         for c in companies:
@@ -227,9 +235,9 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
             if not cm[c.id].values.get("market_cap") or not fs_map[c.id].latest_quarter():
                 rl.step(c.id, "valuation", "skipped", "시세 또는 재무 부족")
                 continue
-            comps = [cm[i] for i in ([target.id] + val_peer_ids) if i != c.id and cm[i].values.get("market_cap")]
-            if c.id == target.id:
-                comps = [cm[i] for i in val_peer_ids]
+            comps = [cm[i] for i in peer_universe if i != c.id]
+            if c.id != target.id and cm[target.id].values.get("market_cap"):
+                comps.append(cm[target.id])
             # backlog: official periodic report table → disclosure-based estimate
             book = cd.contract_book(db, c.id, today)
             ob = official_backlog(db, dart, c) if c.corp_code else None

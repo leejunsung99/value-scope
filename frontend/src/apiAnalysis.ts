@@ -60,7 +60,8 @@ export interface MethodInput {
   multiple: string
   key: string
   fallback?: boolean
-  peers?: { name: string; value: number; eid?: string }[]
+  peers?: { name: string; value: number; eid?: string; weight?: number }[]
+  dropped?: { name: string; value: number }[]
   quantiles: Record<Scenario, number>
   n?: number
   range?: number[]
@@ -77,6 +78,8 @@ export interface MethodResult {
   peer_count?: number
   fallback?: boolean
   observations?: Record<string, { date: string; value: number }[]>
+  quality?: { percentile: number | null; metrics: Record<string, { label: string; target: number; percentile: number; peer_median: number }> }
+  quality_percentile_used?: number
 }
 export interface Attribution {
   available: boolean

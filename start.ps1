@@ -54,6 +54,24 @@ if ($AppHost -notin @("127.0.0.1", "localhost")) {
 }
 $AppPort = Get-EnvValue "APP_PORT" "8000"
 
+# 서버는 하나만: 같은 포트에 이전 ValueScope 서버가 떠 있으면 종료 후 다시 시작한다.
+# 다른 프로그램이 포트를 쓰고 있으면 건드리지 않고 안내한다.
+function Stop-OldValueScope([int]$port) {
+    $conns = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue
+    foreach ($c in $conns) {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$($c.OwningProcess)" -ErrorAction SilentlyContinue
+        if ($proc -and $proc.CommandLine -match "uvicorn\s+app\.main:app") {
+            Write-Host "포트 $port 에서 실행 중인 이전 ValueScope 서버(PID $($proc.ProcessId))를 종료합니다." -ForegroundColor Yellow
+            Stop-Process -Id $proc.ProcessId -Force -Confirm:$false
+            Start-Sleep -Milliseconds 800
+        } elseif ($proc) {
+            Write-Host "포트 $port 를 다른 프로그램($($proc.Name), PID $($proc.ProcessId))이 사용 중입니다. .env의 APP_PORT를 바꾸세요." -ForegroundColor Red
+            exit 1
+        }
+    }
+}
+Stop-OldValueScope ([int]$AppPort)
+
 if ($Dev) {
     Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location '$Frontend'; npm run dev"
     if (-not $NoBrowser) { Start-Process "http://localhost:5173" }

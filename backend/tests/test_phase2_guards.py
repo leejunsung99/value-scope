@@ -5,17 +5,18 @@ from app.services import engine as eng
 from app.services.report import INVEST_ADVICE, known_values
 
 
-def test_peer_multiple_with_excessive_dispersion_is_excluded():
+def test_peer_outlier_is_trimmed_not_whole_multiple():
     ev = eng.Evidence()
     t = eng.CompanyMetrics(1, "T", values={"ebit_norm": 100.0, "ni_core_norm": 80.0, "net_debt": 0.0,
                                            "minority_interest": 0.0, "shares_out": 10.0})
-    # EV/정상EBIT 2.8 / 3.1 / 18.0 -> max/min 6.4x > 3 -> excluded; 정상 P/E 4/7/11 -> kept
+    # EV/정상EBIT 2.8 / 3.1 / 18.0: 18.0 is > 2.5x the median 3.1 -> trimmed -> only 2 left -> multiple unavailable
+    # 정상 P/E 4 / 7 / 11: all within 2.5x of the median -> used
     peers = [eng.CompanyMetrics(i, f"P{i}", values={"ev_ebit_norm": a, "pe_norm": b})
              for i, (a, b) in enumerate([(2.8, 4.0), (3.1, 7.0), (18.0, 11.0)], start=2)]
     r = eng.method_peer(t, peers, ev)
     assert [u["multiple"] for u in r["inputs"]] == ["정상 P/E"]
-    assert any("분산 과대" in n for n in r["notes"])
-    assert r["scenarios"]["base"]["per_share"] == pytest.approx(7.0 * 80 / 10)
+    assert any("이상치 제외" in n and "P4 18.0" in n for n in r["notes"])
+    assert r["scenarios"]["base"]["per_share"] == pytest.approx(7.0 * 80 / 10)  # no quality data -> median
 
 
 def test_wide_combined_range_means_hold_judgement():
@@ -56,16 +57,44 @@ def test_forward_keeps_multiple_fixed_across_scenarios():
     assert r["earnings_based"] is True
 
 
-def test_small_sample_dispersion_uses_min_max():
+def test_small_sample_outlier_trim_keeps_comparable_peers():
     ev = eng.Evidence()
     t = eng.CompanyMetrics(1, "T", values={"ebit_norm": 100.0, "ni_core_norm": 80.0, "net_debt": 0.0,
                                            "minority_interest": 0.0, "shares_out": 10.0})
-    # 4 peers 2.6 / 16.8 / 18.7 / 35.9: quartiles 13.3~23.0 (1.7x) would pass, but min/max is 13.8x -> excluded
+    # 2.6 / 16.8 / 18.7 / 35.9: median 17.75 -> 2.6 trimmed (< 17.75/2.5); remaining max/min 2.1x -> reliable
     peers = [eng.CompanyMetrics(i, f"P{i}", values={"ev_ebit_norm": a, "pe_norm": b})
              for i, (a, b) in enumerate([(2.6, 10.0), (16.8, 12.0), (18.7, 13.0), (35.9, 14.0)], start=2)]
     r = eng.method_peer(t, peers, ev)
-    assert [u["multiple"] for u in r["inputs"]] == ["정상 P/E"]
-    assert any("최대/최소 13.8배" in n for n in r["notes"])
+    ev_in = next(u for u in r["inputs"] if u["multiple"] == "EV/정상EBIT")
+    assert [p["name"] for p in ev_in["dropped"]] == ["P2"] and ev_in["reliable"]
+    assert {p["name"] for p in ev_in["peers"]} == {"P3", "P4", "P5"}
+
+
+def test_peer_weights_and_quality_percentile_pick_the_multiple():
+    ev = eng.Evidence()
+    # target has the best margin/ROE/growth among peers -> percentile 1.0 -> clamped to 75%
+    t = eng.CompanyMetrics(1, "T", values={"ebit_norm": 100.0, "net_debt": 0.0, "minority_interest": 0.0, "shares_out": 10.0,
+                                           "margin_norm": 0.30, "roe_norm": 0.25, "revenue_growth": 0.5})
+    peers = []
+    for i, (m, w) in enumerate([(8.0, 1.0), (10.0, 1.0), (12.0, 1.0), (14.0, 0.25)], start=2):
+        p = eng.CompanyMetrics(i, f"P{i}", values={"ev_ebit_norm": m, "margin_norm": 0.1, "roe_norm": 0.1, "revenue_growth": 0.1})
+        p.weight = w
+        peers.append(p)
+    r = eng.method_peer(t, peers, ev)
+    assert r["quality"]["percentile"] == pytest.approx(1.0) and r["quality_percentile_used"] == 0.75
+    q = r["inputs"][0]["quantiles"]
+    # scenarios centred on the quality percentile: 50% / 75% / 100% weighted quantiles
+    assert q["conservative"] < q["base"] < q["optimistic"]
+    assert q["optimistic"] == pytest.approx(14.0) and q["base"] < 14.0  # low-weight 14x peer only reached at the top
+
+
+def test_pe_and_pb_over_roe_are_not_double_counted():
+    ev = eng.Evidence()
+    t = eng.CompanyMetrics(1, "T", values={"ebit_norm": 100.0, "ni_core_norm": 80.0, "net_debt": 0.0, "minority_interest": 0.0,
+                                           "shares_out": 10.0, "equity_owners": 500.0, "roe_norm": 0.16})
+    peers = [eng.CompanyMetrics(i, f"P{i}", values={"ev_ebit_norm": x, "pe_norm": x}) for i, x in enumerate([5.0, 6.0, 7.0], start=2)]
+    r = eng.method_peer(t, peers, ev)
+    assert [u["multiple"] for u in r["inputs"]] == ["EV/정상EBIT", "정상 P/E"]
 
 
 def test_loss_maker_without_earnings_method_is_held():

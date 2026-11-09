@@ -83,10 +83,14 @@ function MethodCard({ m }: { m?: MethodResult }) {
       {m.inputs?.map((u) => (
         <div key={u.multiple} className="mt-2 text-slate-600 dark:text-slate-400">
           <b>{u.multiple}</b>{u.fallback && ' (대체 배수)'} — 하위/중앙/상위 {u.quantiles.conservative.toFixed(1)} / {u.quantiles.base.toFixed(1)} / {u.quantiles.optimistic.toFixed(1)}배
-          {u.peers && <div>비교기업: {u.peers.map((p) => `${p.name} ${p.value.toFixed(1)}`).join(', ')}</div>}
+          {u.peers && <div>비교기업(가중치): {u.peers.map((p) => `${p.name} ${p.value.toFixed(1)}${p.weight != null ? ` (${p.weight.toFixed(2)})` : ''}`).join(', ')}</div>}
+          {!!u.dropped?.length && <div className="text-amber-700 dark:text-amber-400">이상치 제외: {u.dropped.map((p) => `${p.name} ${p.value.toFixed(1)}`).join(', ')}</div>}
           {u.n && <div>과거 월말 관측 {u.n}개 (범위 {u.range?.[0].toFixed(1)}~{u.range?.[1].toFixed(1)}배)</div>}
         </div>
       ))}
+      {m.quality?.percentile != null && (
+        <div className="mt-2 text-slate-600 dark:text-slate-400">고객사 품질 백분위 {pct(m.quality.percentile, 0)} (적용 {pct(m.quality_percentile_used ?? null, 0)}): {Object.values(m.quality.metrics).map((q) => `${q.label} ${pct(q.percentile, 0)}`).join(' · ')}</div>
+      )}
       {m.assumptions?.backlog && (
         <div className="mt-2 space-y-0.5 text-slate-600 dark:text-slate-400">
           <div>공식 수주잔고 {krw(m.assumptions.backlog)} ({m.assumptions.backlog_as_of})</div>

@@ -21,7 +21,7 @@ from app.services.dart import DartClient, DartError, DartNoData
 REPORTS = [("11013", 1, "1분기"), ("11012", 2, "반기"), ("11014", 3, "3분기"), ("11011", 4, "사업")]
 QUARTER_END = {1: "03-31", 2: "06-30", 3: "09-30", 4: "12-31"}
 FILING_LAG_DAYS = {1: 50, 2: 50, 3: 50, 4: 95}  # 법정 제출기한 근사
-YEARS_BACK = 6  # 정상화(12분기)·자사 과거 평가에 필요한 이력
+YEARS_BACK = 8  # 5년 정상화 + 자사 과거 평가(과거 시점의 5년 창)에 필요한 이력
 
 FLOW_METRICS = {
     "revenue": (("IS", "CIS"), ["ifrs-full_Revenue"], ["매출액", "수익(매출액)", "영업수익", "매출", "매출액(수익)"]),

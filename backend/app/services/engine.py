@@ -88,6 +88,7 @@ class CompanyMetrics:
     values: dict = field(default_factory=dict)
     na: dict = field(default_factory=dict)  # metric -> reason
     eids: dict = field(default_factory=dict)
+    weight: float = 1.0  # 비교군 가중치 (적합성 점수 × 활용 구분)
 
 
 def compute_metrics(fs: FinSeries, px: dict, shares: dict | None, ev: Evidence, as_of: str) -> CompanyMetrics:
@@ -188,19 +189,21 @@ def compute_metrics(fs: FinSeries, px: dict, shares: dict | None, ev: Evidence, 
                                                    "non_operating_ttm", "reported_ni_ttm")})
         nm = normalized(fs, lq)
         if nm:
-            v.update({k: nm[k] for k in ("ebit_norm", "revenue_norm", "margin_norm", "ni_core_norm", "net_interest_norm")})
+            v.update({k: nm[k] for k in ("ebit_norm", "revenue_norm", "margin_norm", "ni_core_norm", "net_interest_norm", "quarters")})
+            v["norm_quarters"] = nm["quarters"]
             v["norm_window"] = nm["window"]
-            e["ebit_norm"] = ev.add("calc", f"{c.name} 정상 EBIT(12개 분기 평균)", nm["ebit_norm"], "KRW", fmt_krw(nm["ebit_norm"]),
-                                    period=nm["window"], as_of=lq, company=c, method="최근 12개 분기 영업이익 합 ÷ 3 (수주 사이클 평균)",
+            e["ebit_norm"] = ev.add("calc", f"{c.name} 정상 EBIT({nm['quarters']}개 분기 연평균)", nm["ebit_norm"], "KRW", fmt_krw(nm["ebit_norm"]),
+                                    period=nm["window"], as_of=lq, company=c,
+                                    method=f"최근 {nm['quarters']}개 분기 영업이익 합 ÷ {nm['quarters'] / 4:g}년 (수주 사이클 평균, 최대 5년)",
                                     source="OpenDART 재무제표", impact="상대·과거 평가의 이익 기준")
-            e["margin_norm"] = ev.add("calc", f"{c.name} 영업이익률(12개 분기 평균)", nm["margin_norm"], "ratio", fmt_pct(nm["margin_norm"]),
-                                      period=nm["window"], as_of=lq, company=c, method="12개 분기 영업이익 합 ÷ 12개 분기 매출 합",
+            e["margin_norm"] = ev.add("calc", f"{c.name} 영업이익률({nm['quarters']}개 분기 평균)", nm["margin_norm"], "ratio", fmt_pct(nm["margin_norm"]),
+                                      period=nm["window"], as_of=lq, company=c, method=f"{nm['quarters']}개 분기 영업이익 합 ÷ 같은 기간 매출 합",
                                       source="OpenDART 재무제표")
             e["ni_core_norm"] = ev.add("calc", f"{c.name} 정상 순이익", nm["ni_core_norm"], "KRW", fmt_krw(nm["ni_core_norm"]),
                                        period=nm["window"], as_of=lq, company=c,
                                        method="(정상 EBIT + 연평균 순이자) × (1 − 적용 세율)", source="OpenDART 재무제표")
         else:
-            na["ebit_norm"] = "12개 분기 재무 이력 부족 — 정상화 이익 산출 불가"
+            na["ebit_norm"] = "연속 12개 분기 이상의 재무 이력이 없어 정상화 이익 산출 불가"
 
     # ---- market data
     if px.get("price"):
@@ -256,6 +259,12 @@ def compute_metrics(fs: FinSeries, px: dict, shares: dict | None, ev: Evidence, 
         mult("per_adj", mc, v.get("core_ni_ttm"), "조정 PER(경상순이익 TTM)", "TTM 경상순이익 적자")
         mult("ev_ebit_norm", ev_val, v.get("ebit_norm"), "EV/정상EBIT", "정상 EBIT 0 이하 또는 12개 분기 이력 부족")
         mult("pe_norm", mc, v.get("ni_core_norm"), "정상 P/E", "정상 순이익 0 이하 또는 12개 분기 이력 부족")
+    # 정상 ROE — 비교군 품질 백분위(수익성) 산정에 사용
+    if v.get("ni_core_norm") is not None and v.get("equity_owners") and v["equity_owners"] > 0:
+        v["roe_norm"] = v["ni_core_norm"] / v["equity_owners"]
+        e["roe_norm"] = ev.add("calc", f"{c.name} 정상 ROE", v["roe_norm"], "ratio", fmt_pct(v["roe_norm"]), as_of=lq, company=c,
+                               method="정상 순이익 ÷ 지배주주지분", source="OpenDART 재무제표")
+
     na["forward_per"] = "신뢰 가능한 공식 전망치(컨센서스)를 확보하지 않아 미산출"
     return m
 
@@ -291,48 +300,137 @@ def _per_share(equity: float | None, mv: dict) -> float | None:
     return max(equity, 0.0) / so
 
 
+OUTLIER_FACTOR = 2.5   # 가중 중앙값 대비 2.5배 밖이면 이상치
+MIN_PEERS_AFTER_TRIM = 3
+QUALITY_METRICS = [("margin_norm", "정상 영업이익률"), ("roe_norm", "정상 ROE"), ("revenue_growth", "매출 성장률(TTM)")]
+
+
+def _wquantile(vals: list[float], weights: list[float], q: float) -> float:
+    """가중 분위수 (선형 보간)."""
+    pairs = sorted(zip(vals, weights))
+    tot = sum(w for _, w in pairs)
+    cum, pts = 0.0, []
+    for v, w in pairs:
+        pts.append(((cum + w / 2) / tot, v))
+        cum += w
+    if q <= pts[0][0]:
+        return pts[0][1]
+    if q >= pts[-1][0]:
+        return pts[-1][1]
+    for (q0, v0), (q1, v1) in zip(pts, pts[1:]):
+        if q0 <= q <= q1:
+            return v0 + (v1 - v0) * (q - q0) / (q1 - q0) if q1 > q0 else v1
+    return pts[-1][1]
+
+
+def quality_percentile(target: CompanyMetrics, peers: list[CompanyMetrics]) -> dict:
+    """고객사가 비교군 안에서 몇 번째 수준인지(가중 백분위). 지표별 + 평균."""
+    out = {"metrics": {}, "percentile": None}
+    ps = []
+    for key, label in QUALITY_METRICS:
+        tv = target.values.get(key)
+        pv = [(p.values.get(key), p.weight) for p in peers if p.values.get(key) is not None]
+        if tv is None or len(pv) < 2:
+            continue
+        tot = sum(w for _, w in pv)
+        below = sum(w for v, w in pv if v < tv) + 0.5 * sum(w for v, w in pv if v == tv)
+        pct = below / tot
+        out["metrics"][key] = {"label": label, "target": tv, "percentile": pct,
+                               "peer_median": _wquantile([v for v, _ in pv], [w for _, w in pv], 0.5),
+                               "peers": [{"name": p.name, "value": p.values.get(key)} for p in peers if p.values.get(key) is not None]}
+        ps.append(pct)
+    if ps:
+        out["percentile"] = sum(ps) / len(ps)
+    return out
+
+
 def method_peer(target: CompanyMetrics, peers: list[CompanyMetrics], ev: Evidence) -> dict:
+    """B. 동종업계 상대평가 (비교군 활용 규칙 v2).
+
+    1) 비교군 가중치 = STEP 1 적합성 점수(없으면 50) × 활용구분(적정가치 비교용 1.0 · 산업 참고용 0.5)
+    2) 배수: EV/정상EBIT, 정상 P/E  (PBR÷ROE는 수학적으로 P/E와 같아 중복이므로 쓰지 않음)
+    3) 이상치: 가중 중앙값 대비 2.5배 밖 제외, 남은 비교기업 3개 미만이면 그 배수 미사용
+    4) 기준 배수 = 고객사 품질 백분위 p(정상 이익률·ROE·성장률 평균, 25~75%로 제한)의 비교군 가중 분위수
+       보수 = p−25%p 분위수, 낙관 = p+25%p 분위수 (품질 위치를 중심으로 한 시나리오)
+    5) 이상치 제거 후에도 분산(표본 6개 미만은 최대/최소)이 3배를 넘으면 사용하되 '신뢰도 낮음'
+    """
     mv = target.values
-    res = {"method": "peer", "label": METHOD_LABEL["peer"], "available": False, "scenarios": {}, "notes": [], "inputs": []}
-    used = []
-    plans = [("ev_ebit_norm", "ebit_norm", "EV/정상EBIT", True), ("pe_norm", "ni_core_norm", "정상 P/E", False)]
-    fallback = [("ev_sales", "revenue_ttm", "EV/Sales", True), ("pbr", "equity_owners", "PBR", False)]
-    for group, is_fallback in ((plans, False), (fallback, True)):
-        for key, base_key, label, is_ev in group:
+    res = {"method": "peer", "label": METHOD_LABEL["peer"], "available": False, "scenarios": {}, "notes": [], "inputs": [],
+           "rules": "가중치·이상치 제거·ROE 보정 PBR·품질 백분위 배수"}
+    qual = quality_percentile(target, peers)
+    res["quality"] = qual
+    p_raw = qual["percentile"]
+    p_used = min(0.75, max(0.25, p_raw)) if p_raw is not None else 0.5
+    res["quality_percentile_used"] = p_used
+    plans = [("ev_ebit_norm", "ebit_norm", "EV/정상EBIT", "ev"),
+             ("pe_norm", "ni_core_norm", "정상 P/E", "eq")]
+    used, low_rel = [], False
+    for key, base_key, label, kind in plans:
+        base = mv.get(base_key)
+        raw = [(p.name, p.values[key], p.weight, p.eids.get(key)) for p in peers if p.values.get(key) is not None and p.values[key] > 0]
+        if base is None or base <= 0:
+            res["notes"].append(f"{label}: 고객사 기준지표가 0 이하 또는 없음 → 적용 불가")
+            continue
+        if len(raw) < MIN_PEERS_AFTER_TRIM:
+            res["notes"].append(f"{label}: 유효 비교기업 {len(raw)}개(3개 미만) → 적용 불가")
+            continue
+        med = _wquantile([x[1] for x in raw], [x[2] for x in raw], 0.5)
+        kept = [x for x in raw if med / OUTLIER_FACTOR <= x[1] <= med * OUTLIER_FACTOR]
+        dropped = [x for x in raw if x not in kept]
+        if dropped:
+            res["notes"].append(f"{label}: 이상치 제외(가중 중앙값 {med:.1f}배의 {OUTLIER_FACTOR}배 밖) — "
+                                + ", ".join(f"{n} {v:.1f}" for n, v, _, _ in dropped))
+        if len(kept) < MIN_PEERS_AFTER_TRIM:
+            res["notes"].append(f"{label}: 이상치 제외 후 비교기업 {len(kept)}개(3개 미만) → 적용 불가")
+            res.setdefault("excluded", []).append({"multiple": label, "quantiles": {"conservative": med, "base": med, "optimistic": med},
+                                                   "dispersion": None, "peers": [{"name": n, "value": v} for n, v, _, _ in raw]})
+            continue
+        vals, ws = [x[1] for x in kept], [x[2] for x in kept]
+        qs = {"conservative": _wquantile(vals, ws, max(0.0, p_used - 0.25)), "base": _wquantile(vals, ws, p_used),
+              "optimistic": _wquantile(vals, ws, min(1.0, p_used + 0.25))}
+        dsp = dispersion({"conservative": _wquantile(vals, ws, 0.25), "optimistic": _wquantile(vals, ws, 0.75)}, vals)
+        reliable = dsp is not None and dsp <= MAX_MULTIPLE_DISPERSION
+        if not reliable:
+            low_rel = True
+            res["notes"].append(f"{label}: 이상치 제외 후에도 분산 {dsp or 0:.1f}배(>{MAX_MULTIPLE_DISPERSION:.0f}배) — 사용하되 신뢰도 낮음")
+        per = {}
+        for s in SCENARIOS:
+            if kind == "ev":
+                evv = qs[s] * base
+                eq = _equity_from_ev(evv, mv)
+            else:
+                evv, eq = None, qs[s] * base
+            per[s] = {"multiple": qs[s], "base_metric": base, "enterprise_value": evv, "equity_value": eq, "per_share": _per_share(eq, mv)}
+        used.append({"multiple": label, "key": key, "fallback": False, "dispersion": dsp, "reliable": reliable,
+                     "peers": [{"name": n, "value": v, "weight": w, "eid": i} for n, v, w, i in kept],
+                     "dropped": [{"name": n, "value": v} for n, v, _, _ in dropped],
+                     "weighted_median": med, "quantiles": qs, "results": per, "base_eid": target.eids.get(base_key)})
+    if not used:
+        # 최후 대체: 매출·자산 배수 (이익 기반 아님 → 단독으로는 판단 근거가 되지 않음)
+        for key, base_key, label in [("ev_sales", "revenue_ttm", "EV/Sales"), ("pbr", "equity_owners", "PBR")]:
             base = mv.get(base_key)
-            pvals = [(p.name, p.values[key], p.eids.get(key)) for p in peers if p.values.get(key) is not None and p.values[key] > 0]
-            if base is None or base <= 0:
-                res["notes"].append(f"{label}: 고객사 기준지표가 0 이하 또는 없음 → 적용 불가")
+            raw = [(p.name, p.values[key], p.weight) for p in peers if p.values.get(key) is not None and p.values[key] > 0]
+            if not base or base <= 0 or len(raw) < MIN_PEERS_AFTER_TRIM:
                 continue
-            if len(pvals) < 2:
-                res["notes"].append(f"{label}: 유효 비교기업 {len(pvals)}개(2개 미만) → 적용 불가")
-                continue
-            qs = _quantiles([x[1] for x in pvals])
-            dsp = dispersion(qs, [x[1] for x in pvals])
-            if dsp is None or dsp > MAX_MULTIPLE_DISPERSION:
-                res["notes"].append(f"{label}: 비교기업 간 분산 과대({'최대/최소' if len(pvals) < 6 else '상위/하위'} {dsp or 0:.1f}배 > {MAX_MULTIPLE_DISPERSION:.0f}배: "
-                                    + ", ".join(f"{n} {x:.1f}" for n, x, _ in pvals) + ") → 비교 근거에서 제외")
-                res.setdefault("excluded", []).append({"multiple": label, "quantiles": qs, "dispersion": dsp,
-                                                       "peers": [{"name": n, "value": x} for n, x, _ in pvals]})
-                continue
+            vals, ws = [x[1] for x in raw], [x[2] for x in raw]
+            qs = {"conservative": _wquantile(vals, ws, 0.25), "base": _wquantile(vals, ws, 0.5), "optimistic": _wquantile(vals, ws, 0.75)}
             per = {}
             for s in SCENARIOS:
-                if is_ev:
+                if key == "ev_sales":
                     evv = qs[s] * base
                     eq = _equity_from_ev(evv, mv)
                 else:
                     evv, eq = None, qs[s] * base
-                per[s] = {"multiple": qs[s], "base_metric": base, "enterprise_value": evv, "equity_value": eq,
-                          "per_share": _per_share(eq, mv)}
-            used.append({"multiple": label, "key": key, "fallback": is_fallback, "dispersion": dsp, "peers": [{"name": n, "value": x, "eid": i} for n, x, i in pvals],
+                per[s] = {"multiple": qs[s], "base_metric": base, "enterprise_value": evv, "equity_value": eq, "per_share": _per_share(eq, mv)}
+            used.append({"multiple": label, "key": key, "fallback": True, "peers": [{"name": n, "value": v, "weight": w} for n, v, w in raw],
                          "quantiles": qs, "results": per, "base_eid": target.eids.get(base_key)})
         if used:
-            if is_fallback:
-                res["notes"].append("이익 배수 적용이 불가해 대체 배수(" + ", ".join(u["multiple"] for u in used) + ")만 사용 — 신뢰도 하향")
-                res["fallback"] = True
-            break
+            res["fallback"] = True
+            res["notes"].append("이익 기반 배수를 쓸 수 없어 대체 배수(" + ", ".join(u["multiple"] for u in used) + ")만 사용 — 신뢰도 하향")
     if not used:
         return res
+    if low_rel and not res.get("fallback"):
+        res["fallback"] = True  # 가중치 절반·신뢰도 감점 경로 재사용
     res["available"] = True
     res["inputs"] = used
     res["earnings_based"] = any(u["key"] in EARNINGS_KEYS for u in used)
@@ -342,12 +440,18 @@ def method_peer(target: CompanyMetrics, peers: list[CompanyMetrics], ev: Evidenc
                                "components": {u["multiple"]: u["results"][s] for u in used}}
     res["peer_count"] = max(len(u["peers"]) for u in used)
     b = res["scenarios"]["base"]["per_share"]
+    qtxt = ", ".join(f"{m['label']} {m['percentile']:.0%}" for m in qual["metrics"].values())
+    method_txt = "; ".join(f"{u['multiple']} 비교군({', '.join(f'{p['name']} {p['value']:.1f}' for p in u['peers'])}) "
+                           f"{'품질 백분위' if not u.get('fallback') else '중앙값'} 배수 {u['quantiles']['base']:.1f}배" for u in used)
+    if p_raw is not None:
+        method_txt += f" | 고객사 품질 백분위 {p_raw:.0%}(적용 {p_used:.0%})"
     res["eid"] = ev.add("estimate", f"{target.name} 동종업계 상대평가 주당가치(기준)", b, "KRW/주", f"{b:,.0f}원" if b else "N/A",
-                        company=None, method="; ".join(f"{u['multiple']} 비교기업 중앙값 {u['quantiles']['base']:.1f}배 × 고객사 기준지표(정상화 이익)" for u in used)
-                        + " → EV에서 순차입금·비지배지분 차감 → 유통주식수로 나눔 (복수 배수는 평균)"
-                        + ("".join(f" | 제외: {n}" for n in res["notes"]) if res["notes"] else ""),
-                        source="ValueScope 계산", impact="동종업계 대비 적정가치 기준점",
-                        detail={"inputs": used, "excluded": res.get("excluded", [])})
+                        company=None, method=method_txt, source="ValueScope 계산",
+                        impact="동종업계 대비 적정가치 기준점",
+                        detail={"inputs": used, "quality": qual, "quality_percentile_used": p_used, "notes": res["notes"]})
+    ev.items[-1]["method"] = ((ev.items[-1]["method"] or "") + (f" (지표별: {qtxt})" if qtxt else "")
+                              + " | 규칙: 가중치=적합성점수×활용구분, 이상치(중앙값 2.5배 밖) 제외, 기준배수=품질 백분위 p(25~75%), 보수/낙관=p∓25%p"
+                              + "".join(f" | {n}" for n in res["notes"]))
     return res
 
 
@@ -455,24 +559,28 @@ def method_forward(target: CompanyMetrics, fs: FinSeries, schedule: dict, peer_r
     from app.services.normalize import sum_q
 
     lq = mv.get("latest_quarter")
-    op8 = sum_q(fs, "operating_income", lq, 8) if (fs is not None and lq) else None
+    nq = int(mv.get("norm_quarters") or 12)
+    past_q = nq - 4
+    op8 = sum_q(fs, "operating_income", lq, past_q) if (fs is not None and lq) else None
     if op8 is None:
-        res["notes"].append("최근 8개 분기 영업이익 이력이 없어 향후 이익을 정상화 기준으로 환산할 수 없음 → 적용 불가")
+        res["notes"].append(f"최근 {past_q}개 분기 영업이익 이력이 없어 향후 이익을 정상화 기준으로 환산할 수 없음 → 적용 불가")
         return res
+    years = nq / 4
     res["available"] = True
     res["earnings_based"] = True
     res["assumptions"] = {
         "backlog": schedule["official_backlog"], "backlog_source": "정기보고서 수주상황 표", "backlog_as_of": schedule["as_of"],
         "forward_revenue": {s: schedule["scenarios"][s]["revenue"] for s in SCENARIOS}, "recognition_rule": schedule["rule"],
-        "op_margin": opm, "op_margin_basis": "보수 min(3년 평균, TTM) · 기준 3년(12분기) 평균 · 낙관 max",
+        "op_margin": opm, "op_margin_basis": f"보수 min({nq}분기 평균, TTM) · 기준 {nq}분기 평균 · 낙관 max",
         "multiple_source": mult_src[0], "multiple": m_base, "multiples": mult_src[1], "op_last8": op8,
-        "normalization": "향후 정상 EBIT = (최근 8개 분기 영업이익 + 향후 12개월 영업이익) ÷ 3 — 배수(EV/정상EBIT)와 같은 3년 평균 기준",
+        "normalization": f"향후 정상 EBIT = (최근 {past_q}개 분기 영업이익 + 향후 12개월 영업이익) ÷ {years:g}년 — 배수(EV/정상EBIT)와 같은 {years:g}년 평균 기준",
+        "past_quarters": past_q,
         "undisclosed_contracts": schedule["undisclosed_contracts"], "undisclosed_pool": schedule["undisclosed_pool"],
     }
     for s in SCENARIOS:
         rev = schedule["scenarios"][s]["revenue"]
         ebit = rev * opm[s]
-        ebit_n = (op8 + ebit) / 3
+        ebit_n = (op8 + ebit) / years
         if ebit_n > 0:
             evv = ebit_n * m_base
             eq = _equity_from_ev(evv, mv)
@@ -485,7 +593,7 @@ def method_forward(target: CompanyMetrics, fs: FinSeries, schedule: dict, peer_r
     res["eid"] = ev.add("estimate", f"{target.name} 미래이익(수주 납기) 기반 주당가치(기준)", b["per_share"], "KRW/주",
                         f"{b['per_share']:,.0f}원" if b["per_share"] else "N/A",
                         method=f"향후 12개월 납기 도래 수주잔고 {fmt_krw(b['forward_revenue'])} × 영업이익률 {opm['base']:.1%}(12분기 평균)"
-                               f" = 향후 영업이익 {fmt_krw(b['forward_ebit'])} → 정상 EBIT 환산 (최근 8분기 {fmt_krw(op8)} + 향후) ÷ 3"
+                               f" = 향후 영업이익 {fmt_krw(b['forward_ebit'])} → 정상 EBIT 환산 (최근 {past_q}분기 {fmt_krw(op8)} + 향후) ÷ {years:g}"
                                f" = {fmt_krw(b['forward_ebit_norm'])} × EV/정상EBIT {m_base:.1f}배({mult_src[0]}) − 순차입금 − 비지배지분 → 주당가치",
                         source="ValueScope 추정(명시적 가정)", impact="수주 납기 기반 향후 이익 반영",
                         detail={"assumptions": res["assumptions"], "scenarios": res["scenarios"]})
@@ -593,7 +701,8 @@ def combine(methods: list[dict], price: float | None, peer_count: int, earnings_
                                     "methods": {m["method"]: {k: m["scenarios"][k]["per_share"] for k in SCENARIOS} for m in avail}})
     out["confidence_eid"] = ev.add("calc", f"{target_name} 분석 신뢰도", conf, "점", f"{conf:.0f}점/100", method="100점에서 감점: " + "; ".join(
         f"{b['reason']}({b['points']})" for b in breakdown) if breakdown else "감점 없음", source="ValueScope 규칙",
-        detail={"breakdown": breakdown, "range_ratio": out.get("range_ratio"), "method_dispersion": out.get("method_dispersion")})
+        detail={"breakdown": breakdown, "range_ratio": out.get("range_ratio"), "method_dispersion": out.get("method_dispersion"),
+                "scale_max": 100})
     return out
 
 

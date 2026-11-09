@@ -219,7 +219,8 @@ def generate_report(ai: AIProvider, payload: dict, evidence: list[dict]) -> dict
                 p = by_ref.get(iss.get("paragraph_ref"))
                 if p:
                     sev = iss.get("severity", "low")
-                    if iss.get("type") in FORCE_HIGH and sev != "high":
+                    hypothetical = p["ref"].startswith("triggers.") and iss.get("type") == "unsupported"
+                    if iss.get("type") in FORCE_HIGH and sev != "high" and not hypothetical:
                         sev = "high"  # 근거 없는 단정·계산·수치·기간 오류는 경미 판정이어도 게시하지 않음
                     p["issues"].append({**iss, "severity": sev, "by": "review_agent", "original_severity": iss.get("severity")})
             if not rv.data.get("counter_evidence_reviewed"):
