@@ -9,6 +9,7 @@ from fastapi.staticfiles import StaticFiles
 from app import models_analysis  # noqa: F401  (register PHASE 2 tables)
 from app.api import router
 from app.api_analysis import router as analysis_router
+from app.api_weekly import router as weekly_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -23,6 +24,7 @@ app.add_middleware(
 )
 app.include_router(router)
 app.include_router(analysis_router)
+app.include_router(weekly_router)
 
 
 @app.exception_handler(RuntimeError)

@@ -63,6 +63,7 @@ class SearchSpec:
     max_items: int
     company_id: int | None = None
     role: str = "target"           # target | peer | theme
+    window: tuple[str, str] | None = None   # 고정 기간(YYYY-MM-DD, YYYY-MM-DD) — 주간 분석용. 없으면 최근 months개월
 
 
 @dataclass
@@ -229,30 +230,38 @@ def searches_today(db: Session) -> int:
 def run_searches(db: Session, searcher, specs: list[SearchSpec], today: date, daily_limit: int,
                  link_client: httpx.Client | None = None, progress=None) -> NewsResult:
     res = NewsResult()
-    todo: list[tuple[SearchSpec, str]] = []
+    todo: list[tuple[SearchSpec, str, str]] = []
     used = searches_today(db)
     for spec in specs:
         last = db.scalar(select(NewsSearch).where(NewsSearch.query_key == spec.query_key, NewsSearch.status == "succeeded")
                          .order_by(NewsSearch.searched_at.desc()))
-        if last and last.until >= today.isoformat():
-            res.outcomes.append(SearchOutcome(spec, "cached"))
-            continue
-        window_start = today - timedelta(days=spec.months * 31)
-        since = window_start.isoformat()
-        if last:
-            since = max(since, (date.fromisoformat(last.until) - timedelta(days=OVERLAP_DAYS)).isoformat())
+        if spec.window:
+            # 고정 기간: 기간이 끝난 뒤 한 번 검색했으면 다시 검색하지 않음
+            until = min(spec.window[1], today.isoformat())
+            if last and last.until >= until:
+                res.outcomes.append(SearchOutcome(spec, "cached"))
+                continue
+            since = spec.window[0]
+        else:
+            until = today.isoformat()
+            if last and last.until >= until:
+                res.outcomes.append(SearchOutcome(spec, "cached"))
+                continue
+            since = (today - timedelta(days=spec.months * 31)).isoformat()
+            if last:
+                since = max(since, (date.fromisoformat(last.until) - timedelta(days=OVERLAP_DAYS)).isoformat())
         if used >= daily_limit:
             res.outcomes.append(SearchOutcome(spec, "skipped_limit", since=since))
             continue
         used += 1
-        todo.append((spec, since))
+        todo.append((spec, since, until))
 
     def work(item):
-        spec, since = item
+        spec, since, until = item
         try:
-            return spec, since, searcher.search(spec, since, today.isoformat()), None
+            return spec, since, until, searcher.search(spec, since, until), None
         except Exception as e:  # noqa: BLE001 — 한 검색 실패가 나머지를 막지 않도록
-            return spec, since, [], f"{type(e).__name__}: {e}"
+            return spec, since, until, [], f"{type(e).__name__}: {e}"
 
     results = []
     if todo:
@@ -264,10 +273,10 @@ def run_searches(db: Session, searcher, specs: list[SearchSpec], today: date, da
     own_client = link_client is None
     client = link_client or httpx.Client(headers={"User-Agent": "Mozilla/5.0 (ValueScope link check)"})
     try:
-        for spec, since, items, err in results:
+        for spec, since, until, items, err in results:
             if err:
                 db.add(NewsSearch(query_key=spec.query_key, company_id=spec.company_id, query=spec.query, since=since,
-                                  until=today.isoformat(), status="failed", error=err[:500], model=getattr(searcher, "model", None)))
+                                  until=until, status="failed", error=err[:500], model=getattr(searcher, "model", None)))
                 res.outcomes.append(SearchOutcome(spec, "failed", error=err, since=since))
                 continue
             existing = {u for (u,) in db.execute(select(NewsItem.url).where(NewsItem.query_key == spec.query_key)).all()}
@@ -275,7 +284,7 @@ def run_searches(db: Session, searcher, specs: list[SearchSpec], today: date, da
             for it in items:
                 if it["url"] in existing:
                     continue
-                if it["pub_date"] and not (since <= it["pub_date"] <= today.isoformat()):
+                if it["pub_date"] and not (since <= it["pub_date"] <= until):
                     continue   # 기간 밖 기사
                 status = check_link(it["url"], client)
                 if status == "gone":
@@ -284,18 +293,20 @@ def run_searches(db: Session, searcher, specs: list[SearchSpec], today: date, da
                 existing.add(it["url"])
                 new += 1
             db.add(NewsSearch(query_key=spec.query_key, company_id=spec.company_id, query=spec.query, since=since,
-                              until=today.isoformat(), status="succeeded", item_count=new, model=getattr(searcher, "model", None)))
+                              until=until, status="succeeded", item_count=new, model=getattr(searcher, "model", None)))
             res.outcomes.append(SearchOutcome(spec, "searched", new_items=new, since=since))
         db.commit()
     finally:
         if own_client:
             client.close()
     for spec in specs:
-        start = (today - timedelta(days=spec.months * 31)).isoformat()
-        res.items[spec.query_key] = list(db.scalars(
-            select(NewsItem).where(NewsItem.query_key == spec.query_key,
-                                   (NewsItem.pub_date >= start) | (NewsItem.pub_date.is_(None)))
-            .order_by(NewsItem.pub_date.desc())))
+        q = select(NewsItem).where(NewsItem.query_key == spec.query_key)
+        if spec.window:
+            q = q.where(NewsItem.pub_date >= spec.window[0], NewsItem.pub_date <= spec.window[1])
+        else:
+            start = (today - timedelta(days=spec.months * 31)).isoformat()
+            q = q.where((NewsItem.pub_date >= start) | (NewsItem.pub_date.is_(None)))
+        res.items[spec.query_key] = list(db.scalars(q.order_by(NewsItem.pub_date.desc())))
     return res
 
 

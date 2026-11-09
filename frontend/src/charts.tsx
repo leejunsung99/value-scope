@@ -326,3 +326,63 @@ export function HistoryChart({ history }: { history: NonNullable<Charts['history
   }
   return <Chart option={option} height={260} />
 }
+
+// ------------------------------------------------------------------ 주간 분석: 지수화 주가 경로 (직전 거래일 = 100)
+export function WeeklyPathChart({ chart, names, targetName }: {
+  chart: { target: [string, number][]; market: [string, number][]; peer_avg: [string, number][] | null; peers: Record<string, [string, number][]> }
+  names: Record<string, string>; targetName: string
+}) {
+  const dark = useDark()
+  const option = useMemo(() => {
+    const t = theme(dark)
+    const b = base(dark)
+    const vals = (pts: [string, number][]) => pts.map((p) => p[1])
+    const series: object[] = Object.keys(chart.peers).map((id) => ({
+      name: names[id] ?? id, type: 'line', data: vals(chart.peers[id]), showSymbol: false,
+      lineStyle: { width: 1, color: t.other, opacity: 0.5 }, itemStyle: { color: t.other }, z: 1,
+    }))
+    if (chart.peer_avg) {
+      series.push({ name: '비교군 가중평균', type: 'line', data: vals(chart.peer_avg), symbolSize: 6,
+        lineStyle: { width: 2.5, color: t.palette[1] }, itemStyle: { color: t.palette[1] }, z: 5 })
+    }
+    series.push({ name: '시장 대용지수', type: 'line', data: vals(chart.market), symbolSize: 5,
+      lineStyle: { width: 2, type: 'dashed', color: t.text }, itemStyle: { color: t.text }, z: 4 })
+    series.push({ name: targetName, type: 'line', data: vals(chart.target), symbolSize: 8,
+      lineStyle: { width: 3, color: t.palette[0] }, itemStyle: { color: t.palette[0] }, z: 10,
+      label: { show: true, position: 'top', color: t.textStrong, fontSize: 10,
+        formatter: (p: { value: number }) => `${p.value - 100 >= 0 ? '+' : ''}${(p.value - 100).toFixed(1)}%` } })
+    return {
+      ...b,
+      legend: { ...b.legend, data: [targetName, '비교군 가중평균', '시장 대용지수'] },
+      tooltip: { ...b.tooltip, trigger: 'axis', valueFormatter: (v: number) => (v == null ? '—' : `${(v - 100).toFixed(2)}%`) },
+      xAxis: { ...b.xAxis, type: 'category', boundaryGap: false, data: chart.target.map((p) => p[0].slice(5)) },
+      grid: { ...b.grid, top: 44 },
+      yAxis: { ...b.yAxis, type: 'value', scale: true },
+      series,
+    }
+  }, [chart, names, targetName, dark])
+  return <Chart option={option} height={300} />
+}
+
+// ------------------------------------------------------------------ 주간 분석: 일별 실제 vs 기대(시장+비교군) vs 개별 요인
+export function WeeklyDailyChart({ days }: { days: { date: string; weekday: string; ret: number; expected: number; residual: number; abnormal: boolean }[] }) {
+  const dark = useDark()
+  const option = useMemo(() => {
+    const t = theme(dark)
+    const b = base(dark)
+    const pc = (v: number) => +(v * 100).toFixed(2)
+    return {
+      ...b,
+      tooltip: { ...b.tooltip, trigger: 'axis', valueFormatter: (v: number) => `${v.toFixed(2)}%` },
+      xAxis: { ...b.xAxis, type: 'category', data: days.map((d) => `${d.date.slice(5)}(${d.weekday})`) },
+      yAxis: { ...b.yAxis, type: 'value', axisLabel: { ...b.yAxis.axisLabel, formatter: '{value}%' } },
+      series: [
+        { name: '실제 수익률', type: 'bar', data: days.map((d) => pc(d.ret)), itemStyle: { color: t.palette[0], borderRadius: 3 } },
+        { name: '기대(시장+비교군)', type: 'bar', data: days.map((d) => pc(d.expected)), itemStyle: { color: t.other, borderRadius: 3 } },
+        { name: '개별 요인', type: 'bar', itemStyle: { borderRadius: 3 },
+          data: days.map((d) => ({ value: pc(d.residual), itemStyle: { color: d.abnormal ? t.palette[7] : t.palette[3] } })) },
+      ],
+    }
+  }, [days, dark])
+  return <Chart option={option} height={260} />
+}

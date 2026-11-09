@@ -35,6 +35,11 @@ export function ProjectIndexRedirect() {
   return <Navigate to={target} replace />
 }
 
+function tabCls(active: boolean, tone: 'blue' | 'violet') {
+  const on = tone === 'blue' ? 'border-blue-600 font-semibold text-blue-700 dark:text-blue-400' : 'border-violet-600 font-semibold text-violet-700 dark:text-violet-300'
+  return `border-b-2 px-3 pb-2 pt-1 text-sm ${active ? on : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'}`
+}
+
 export default function ProjectLayout() {
   const { projectId = '' } = useParams()
   const q = useQuery({
@@ -95,20 +100,30 @@ export default function ProjectLayout() {
             </div>
           </dl>
         </div>
-        <nav className="mt-3 flex gap-1 px-6" aria-label="분석 단계">
-          {STEPS.map((s) => (
-            <NavLink
-              key={s.no}
-              to={s.path}
-              className={({ isActive }) =>
-                `border-b-2 px-3 pb-2 pt-1 text-sm ${isActive ? 'border-blue-600 font-semibold text-blue-700 dark:text-blue-400' : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'}`
-              }
-            >
-              <span className="mr-1.5 text-[11px] font-semibold opacity-70">{s.label}</span>
-              {s.title}
+        <nav className="mt-3 flex items-end gap-1 px-6" aria-label="분석 단계">
+          <NavLink end to="" className={({ isActive }) => tabCls(isActive, 'blue')}>개요</NavLink>
+          {STEPS.filter((s) => s.no === 1).map((s) => (
+            <NavLink key={s.no} to={s.path} className={({ isActive }) => tabCls(isActive, 'blue')}>
+              <span className="mr-1.5 text-[11px] font-semibold opacity-70">{s.label}</span>{s.title}
               <span className={`ml-1.5 text-[11px] font-medium ${toneCls[states[s.no].tone]}`}>· {states[s.no].label}</span>
             </NavLink>
           ))}
+          {/* 분기 1: 통합 분석 */}
+          <div className="ml-3 flex items-end gap-1 border-l border-slate-200 pl-3 dark:border-slate-700">
+            <span className="mb-2 rounded bg-blue-700 px-1.5 py-0.5 text-[10px] font-semibold text-white">통합 분석</span>
+            {STEPS.filter((s) => s.no > 1).map((s) => (
+              <NavLink key={s.no} to={s.path} className={({ isActive }) => tabCls(isActive, 'blue')}>
+                <span className="mr-1.5 text-[11px] font-semibold opacity-70">{s.label}</span>{s.title}
+                <span className={`ml-1.5 text-[11px] font-medium ${toneCls[states[s.no].tone]}`}>· {states[s.no].label}</span>
+              </NavLink>
+            ))}
+          </div>
+          {/* 분기 2: 주간 주가 분석 */}
+          <div className="ml-3 flex items-end gap-1 border-l border-slate-200 pl-3 dark:border-slate-700">
+            <NavLink to="weekly" className={({ isActive }) => tabCls(isActive, 'violet')}>
+              <span className="mr-1.5 rounded bg-violet-700 px-1.5 py-0.5 text-[10px] font-semibold text-white">주간</span>주간 주가 분석
+            </NavLink>
+          </div>
         </nav>
       </header>
       <div className="px-8 py-6">

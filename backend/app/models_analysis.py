@@ -302,3 +302,23 @@ class AnalysisReport(Base):
     content: Mapped[dict] = mapped_column(JSON, default=dict)
     review: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class WeeklyAnalysis(Base):
+    """주간 주가 분석 1회 (월~일 1주). 밸류에이션 없이 고객사·비교군 주가 동조/개별 요인/변동성만 본다."""
+
+    __tablename__ = "weekly_analyses"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), index=True)
+    peer_version_no: Mapped[int] = mapped_column(Integer)
+    week_start: Mapped[str] = mapped_column(String(10), index=True)   # 월요일 YYYY-MM-DD
+    week_end: Mapped[str] = mapped_column(String(10))                 # 일요일
+    status: Mapped[str] = mapped_column(String(20), default="queued")  # queued|running|succeeded|failed
+    stage: Mapped[str | None] = mapped_column(String(100))
+    options: Mapped[dict] = mapped_column(JSON, default=dict)
+    messages: Mapped[list] = mapped_column(JSON, default=list)
+    result: Mapped[dict] = mapped_column(JSON, default=dict)
+    report: Mapped[dict] = mapped_column(JSON, default=dict)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
