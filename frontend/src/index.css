@@ -29,6 +29,9 @@ body { @apply bg-slate-50 text-slate-900 antialiased dark:bg-slate-950 dark:text
 /* 화면용 카드 장식 제거 */
 .print-report .shadow-sm { border: 0 !important; box-shadow: none !important; padding: 0 !important; }
 .print-report .chart-note { display: none; }
+/* 그림·표 안에서는 화면용 카드 제목을 숨김 (캡션이 대신함) */
+.print-report .pr-exhibit h2 { display: none; }
+.print-report .pr-exhibit figcaption { break-after: avoid; }
 .print-report button { cursor: default; }
 @media print {
   html, body { background: #fff !important; }

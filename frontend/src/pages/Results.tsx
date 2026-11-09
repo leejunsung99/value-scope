@@ -256,10 +256,10 @@ export function EarningsAdjustment({ v }: { v: ValuationResult }) {
           </tbody>
         </table>
         <table className="w-full text-xs">
-          <thead><tr><th colSpan={3} className="pb-1 text-left text-[11px] font-semibold">② 정상화 이익 (12개 분기 평균{m.norm_window ? ` · ${m.norm_window}` : ''})</th></tr></thead>
+          <thead><tr><th colSpan={3} className="pb-1 text-left text-[11px] font-semibold">② 정상화 이익 ({m.norm_quarters ?? '—'}개 분기 평균{m.norm_window ? ` · ${m.norm_window}` : ''})</th></tr></thead>
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
             {row('정상 EBIT (연평균 영업이익)', krw(m.ebit_norm), e.ebit_norm)}
-            {row('12분기 영업이익률', pct(m.margin_norm), e.margin_norm, `TTM ${pct(m.op_margin)}`)}
+            {row(`${m.norm_quarters ?? ''}개 분기 영업이익률`, pct(m.margin_norm), e.margin_norm, `TTM ${pct(m.op_margin)}`)}
             {row('정상 순이익', krw(m.ni_core_norm), e.ni_core_norm)}
             {row('EV/EBIT TTM → 정상', `${mult(m.ev_ebit)} → ${mult(m.ev_ebit_norm)}`)}
             {row('정상 P/E', mult(m.pe_norm))}
@@ -377,6 +377,11 @@ export function Dashboard({ r, projectId }: { r: Results; projectId: string }) {
         )}
       </Card>
 
+      {/* ---------------- 보고서 (종합 분석을 먼저, 근거 차트·표는 아래) */}
+      <Section title="근거 기반 종합 분석 — 근거 ID를 누르면 원자료 확인, 아래 차트·표가 상세 근거" right={r.report && <ReviewBadge report={r.report} />}>
+        <ReportSection report={r.report} keys={['overall', 'positive', 'negative', 'peers', 'price_move', 'issues', 'fair_value', 'conclusion', 'triggers']} />
+      </Section>
+
       {/* ---------------- 적정가치 */}
       <div className="grid gap-4 xl:grid-cols-2">
         <Section title="현재 주가와 적정가치 범위">
@@ -460,10 +465,6 @@ export function Dashboard({ r, projectId }: { r: Results; projectId: string }) {
         </Section>
       )}
 
-      {/* ---------------- 보고서 */}
-      <Section title="근거 기반 AI 분석 보고서" right={r.report && <ReviewBadge report={r.report} />}>
-        <ReportSection report={r.report} keys={['overall', 'positive', 'negative', 'peers', 'price_move', 'issues', 'fair_value', 'conclusion', 'triggers']} />
-      </Section>
 
       {r.charts.history && r.charts.history.length > 0 && (
         <Section title="과거 분석별 적정가치 변화"><HistoryChart history={r.charts.history} /></Section>
@@ -483,18 +484,27 @@ export function Dashboard({ r, projectId }: { r: Results; projectId: string }) {
 }
 
 function PdfButtons({ projectId, runId }: { projectId: string; runId: string }) {
-  const pdf = useMutation({ mutationFn: () => downloadReportPdf(projectId, runId) })
+  const brief = useMutation({ mutationFn: () => downloadReportPdf(projectId, runId, 'brief') })
+  const detail = useMutation({ mutationFn: () => downloadReportPdf(projectId, runId, 'detail') })
+  const err = (brief.error ?? detail.error) as Error | null
   return (
     <div className="flex flex-col items-end gap-1 text-xs">
       <div className="flex gap-2">
-        <button onClick={() => pdf.mutate()} disabled={pdf.isPending}
-          className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 font-medium text-white hover:bg-slate-700 disabled:opacity-60 dark:bg-slate-100 dark:text-slate-900">
-          {pdf.isPending ? <><Spinner /> PDF 만드는 중…</> : 'PDF 다운로드'}
+        <button onClick={() => brief.mutate()} disabled={brief.isPending} title="4쪽 내외 보고용 양식: 결론·투자 포인트·리스크·밸류에이션·실적·이슈"
+          className="inline-flex items-center gap-1.5 rounded-md bg-blue-700 px-3 py-1.5 font-medium text-white hover:bg-blue-600 disabled:opacity-60">
+          {brief.isPending ? <><Spinner /> 만드는 중…</> : '분석리포트 PDF'}
         </button>
-        <a href={printUrl(projectId, runId, true)} target="_blank" rel="noreferrer"
-          className="rounded-md border border-slate-300 px-3 py-1.5 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800">브라우저 인쇄로 저장</a>
+        <button onClick={() => detail.mutate()} disabled={detail.isPending} title="장별 분석 서술 + 그림·표 + 근거 부록(검증 내역 포함)"
+          className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 font-medium text-white hover:bg-slate-700 disabled:opacity-60 dark:bg-slate-100 dark:text-slate-900">
+          {detail.isPending ? <><Spinner /> 만드는 중…</> : '상세분석 PDF'}
+        </button>
       </div>
-      {pdf.isError && <div className="max-w-sm text-right text-red-600">{(pdf.error as Error).message}</div>}
+      <div className="flex gap-2 text-[11px] text-slate-500">
+        브라우저 인쇄로 저장:
+        <a href={printUrl(projectId, runId, true, 'brief')} target="_blank" rel="noreferrer" className="hover:text-blue-600 hover:underline">분석리포트</a>
+        <a href={printUrl(projectId, runId, true)} target="_blank" rel="noreferrer" className="hover:text-blue-600 hover:underline">상세분석</a>
+      </div>
+      {err && <div className="max-w-sm text-right text-red-600">{err.message}</div>}
     </div>
   )
 }

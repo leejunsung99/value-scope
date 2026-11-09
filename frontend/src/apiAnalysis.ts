@@ -18,8 +18,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const get = <T>(p: string) => request<T>(p)
 
 /** 서버에서 PDF(로컬 Edge/Chrome headless 변환)를 받아 파일로 저장한다. */
-export async function downloadReportPdf(pid: string, rid: string): Promise<void> {
-  const res = await fetch(`/api/projects/${pid}/analysis-runs/${rid}/report.pdf`)
+export async function downloadReportPdf(pid: string, rid: string, kind: 'detail' | 'brief' = 'detail'): Promise<void> {
+  const res = await fetch(`/api/projects/${pid}/analysis-runs/${rid}/report.pdf?kind=${kind}`)
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
     try {

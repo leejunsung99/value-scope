@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from 'react-router-dom'
 import Layout from './components/Layout'
 import Dashboard from './pages/Dashboard'
+import BriefReport from './pages/BriefReport'
 import PrintReport from './pages/PrintReport'
 import ProjectLayout, { ProjectIndexRedirect } from './pages/ProjectLayout'
 import { CompanyDetail, Step3Results } from './pages/Results'
@@ -11,6 +12,7 @@ export default function App() {
   return (
     <Routes>
       <Route path="print/projects/:projectId/runs/:runId" element={<PrintReport />} />
+      <Route path="print/projects/:projectId/runs/:runId/brief" element={<BriefReport />} />
       <Route element={<Layout />}>
         <Route index element={<Dashboard />} />
         <Route path="projects/:projectId" element={<ProjectLayout />}>

@@ -1,6 +1,7 @@
 """PHASE 2-4 API: 분석 실행·진행률·결과·근거·이력 비교."""
 from __future__ import annotations
 
+import re
 import threading
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -214,8 +215,11 @@ def compare_runs(project_id: str, old_id: str, new_id: str, db: Session = Depend
 
 # --------------------------------------------------------------------- PDF export
 @router.get("/projects/{project_id}/analysis-runs/{run_id}/report.pdf")
-def export_pdf(project_id: str, run_id: str, db: Session = Depends(get_session)):
-    """인쇄용 보고서 화면을 로컬 Edge/Chrome(headless)으로 PDF 변환해 내려준다."""
+def export_pdf(project_id: str, run_id: str, kind: str = "detail", db: Session = Depends(get_session)):
+    """인쇄용 보고서 화면을 로컬 Edge/Chrome(headless)으로 PDF 변환해 내려준다.
+    kind=detail: 상세 분석 보고서(장별 서술+그림·표+근거 부록) · kind=brief: 보고용 리포트(4쪽 내외)."""
+    if kind not in ("detail", "brief"):
+        raise HTTPException(422, "kind는 detail 또는 brief만 가능합니다.")
     from datetime import datetime
     from urllib.parse import quote
 
@@ -231,7 +235,7 @@ def export_pdf(project_id: str, run_id: str, db: Session = Depends(get_session))
         raise HTTPException(409, "빌드된 화면이 없어 서버에서 PDF를 만들 수 없습니다(개발 모드). '브라우저 인쇄로 저장'을 이용하거나 start.ps1 -Rebuild로 실행하세요.")
     s = get_settings()
     host = s.app_host if s.app_host in ("127.0.0.1", "localhost") else "127.0.0.1"
-    url = f"http://{host}:{s.app_port}/print/projects/{project_id}/runs/{run_id}"
+    url = f"http://{host}:{s.app_port}/print/projects/{project_id}/runs/{run_id}" + ("/brief" if kind == "brief" else "")
     project = db.get(Project, project_id)
     name = project.company.name if project and project.company else "report"
     code = (project.company.stock_code if project and project.company else None) or ""
@@ -240,7 +244,10 @@ def export_pdf(project_id: str, run_id: str, db: Session = Depends(get_session))
         pdf = render_pdf(url, s.pdf_browser_path or None, footer=f"ValueScope  |  {code}  |  {day}  |  Not investment advice")
     except PdfUnavailable as e:
         raise HTTPException(503, str(e)) from e
-    fname = f"ValueScope_{name}_{day}.pdf"
+    # 파일명: 회사명_분석리포트.pdf / 회사명_상세분석.pdf (파일명에 쓸 수 없는 문자는 제거)
+    safe_name = re.sub(r'[\\/:*?"<>|]', "", name).strip() or "report"
+    fname = f"{safe_name}_{'분석리포트' if kind == 'brief' else '상세분석'}.pdf"
+    ascii_fallback = f"{code or 'report'}_{'report' if kind == 'brief' else 'detail'}.pdf"
     return Response(pdf, media_type="application/pdf",
-                    headers={"Content-Disposition": f"attachment; filename=\"ValueScope_{day}.pdf\"; filename*=UTF-8''{quote(fname)}",
+                    headers={"Content-Disposition": f"attachment; filename=\"{ascii_fallback}\"; filename*=UTF-8''{quote(fname)}",
                              "Cache-Control": "no-store"})
