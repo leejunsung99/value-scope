@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { Link, NavLink, Outlet, useOutletContext, useParams } from 'react-router-dom'
+import { Link, Navigate, NavLink, Outlet, useOutletContext, useParams } from 'react-router-dom'
 import { api, type Project } from '../api'
 import { Badge, MARKET_LABELS, Notice, Spinner, STEPS, fmtDateTime } from '../ui'
 
@@ -7,15 +7,57 @@ export function useProject() {
   return useOutletContext<{ project: Project }>()
 }
 
+type StepState = { label: string; tone: 'green' | 'blue' | 'amber' | 'slate' }
+
+/** 각 STEP 탭에 표시할 진행 상태 */
+export function stepStates(p: Project): Record<number, StepState> {
+  const ps = p.peer_state
+  const running = ps.last_run && (ps.last_run.status === 'running' || ps.last_run.status === 'queued')
+  return {
+    1: ps.last_search?.status === 'running' ? { label: '검색 중', tone: 'blue' }
+      : ps.latest_version_no ? (ps.draft_dirty ? { label: `v${ps.latest_version_no} · 수정 중`, tone: 'amber' } : { label: `v${ps.latest_version_no} 확정`, tone: 'green' })
+        : { label: '확정 필요', tone: 'slate' },
+    2: running ? { label: '분석 중', tone: 'blue' }
+      : !ps.latest_version_no ? { label: '비교군 확정 후', tone: 'slate' }
+        : ps.needs_reanalysis ? { label: ps.latest_result_run_id ? '재분석 필요' : '실행 필요', tone: 'amber' }
+          : { label: '완료', tone: 'green' },
+    3: ps.latest_result_run_id ? { label: '결과 있음', tone: 'green' } : { label: '결과 없음', tone: 'slate' },
+    4: ps.latest_result_run_id ? { label: '이력 있음', tone: 'green' } : { label: '—', tone: 'slate' },
+  }
+}
+
+/** 프로젝트를 열면 마지막 작업 단계로 이동 (결과가 있으면 STEP 3) */
+export function ProjectIndexRedirect() {
+  const { project } = useProject()
+  const ps = project.peer_state
+  const running = ps.last_run && (ps.last_run.status === 'running' || ps.last_run.status === 'queued')
+  const target = running ? 'analysis' : ps.latest_result_run_id ? 'results' : ps.latest_version_no ? 'analysis' : 'peers'
+  return <Navigate to={target} replace />
+}
+
 export default function ProjectLayout() {
   const { projectId = '' } = useParams()
-  const q = useQuery({ queryKey: ['project', projectId], queryFn: () => api.project(projectId) })
+  const q = useQuery({
+    queryKey: ['project', projectId],
+    queryFn: () => api.project(projectId),
+    // 분석 실행 중에는 상태를 주기적으로 갱신해 탭·결과 링크가 자동으로 바뀌도록 함
+    refetchInterval: (query) => {
+      const r = query.state.data?.peer_state.last_run
+      return r && (r.status === 'running' || r.status === 'queued') ? 3000 : false
+    },
+  })
 
   if (q.isLoading) return <div className="flex items-center gap-2 p-8 text-sm text-slate-500"><Spinner /> 프로젝트 불러오는 중…</div>
   if (q.isError || !q.data) return <div className="p-8"><Notice tone="red">{(q.error as Error)?.message ?? '프로젝트를 찾을 수 없습니다.'}</Notice></div>
   const p = q.data
   const c = p.company
   const search = p.peer_state.last_search
+  const lastRun = p.peer_state.last_run
+  const states = stepStates(p)
+  const toneCls: Record<StepState['tone'], string> = {
+    green: 'text-emerald-600 dark:text-emerald-400', blue: 'text-blue-600 dark:text-blue-400',
+    amber: 'text-amber-600 dark:text-amber-400', slate: 'text-slate-400',
+  }
 
   return (
     <div>
@@ -45,22 +87,26 @@ export default function ProjectLayout() {
             <div>
               <dt className="text-slate-500">상태</dt>
               <dd className="mt-0.5 font-medium">
-                {search?.status === 'running' ? <span className="text-blue-600">동종업계 검색 중</span> : p.last_analysis_status ?? '대기'}
+                {search?.status === 'running' ? <span className="text-blue-600">동종업계 검색 중</span>
+                  : lastRun?.status === 'running' || lastRun?.status === 'queued' ? <span className="text-blue-600">분석 중</span>
+                    : lastRun?.status === 'failed' ? <span className="text-red-600">최근 분석 실패</span>
+                      : p.peer_state.latest_result_run_id ? '분석 완료' : '대기'}
               </dd>
             </div>
           </dl>
         </div>
-        <nav className="mt-3 flex gap-1 px-6">
+        <nav className="mt-3 flex gap-1 px-6" aria-label="분석 단계">
           {STEPS.map((s) => (
             <NavLink
               key={s.no}
               to={s.path}
               className={({ isActive }) =>
-                `border-b-2 px-3 pb-2.5 pt-1 text-sm ${isActive ? 'border-blue-600 font-semibold text-blue-700 dark:text-blue-400' : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'}`
+                `border-b-2 px-3 pb-2 pt-1 text-sm ${isActive ? 'border-blue-600 font-semibold text-blue-700 dark:text-blue-400' : 'border-transparent text-slate-500 hover:text-slate-800 dark:hover:text-slate-200'}`
               }
             >
               <span className="mr-1.5 text-[11px] font-semibold opacity-70">{s.label}</span>
               {s.title}
+              <span className={`ml-1.5 text-[11px] font-medium ${toneCls[states[s.no].tone]}`}>· {states[s.no].label}</span>
             </NavLink>
           ))}
         </nav>

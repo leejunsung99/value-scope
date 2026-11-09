@@ -263,6 +263,9 @@ export default function Step1Peers() {
             title={!g?.draft_dirty && g?.latest_version_no ? '마지막 확정본과 변경 사항이 없습니다' : ''}>
             비교기업 확정
           </Button>
+          {(g?.latest_version_no ?? 0) > 0 && !g?.draft_dirty && (
+            <Button size="sm" onClick={() => nav(`/projects/${pid}/analysis`)}>다음: STEP 2 분석 →</Button>
+          )}
         </div>
       </Card>
 

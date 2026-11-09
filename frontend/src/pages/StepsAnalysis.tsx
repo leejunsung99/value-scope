@@ -60,8 +60,26 @@ export function Step2Analysis() {
   }
   const d = detail.data
   const comps = Object.values(d?.progress?.companies ?? {})
+  const lastDone = runs.data?.find((r) => r.status === 'succeeded' || r.status === 'partial')
   return (
     <div className="space-y-4">
+      {lastDone && !active && (
+        <Card className="flex flex-wrap items-center justify-between gap-4 border-blue-200 bg-blue-50/60 p-5 dark:border-blue-900 dark:bg-blue-950/30">
+          <div>
+            <div className="text-xs font-semibold text-blue-700 dark:text-blue-300">다음 단계 · STEP 3 분석 결과</div>
+            <div className="mt-1 flex flex-wrap items-center gap-2 text-sm">
+              <span>최근 분석 {fmtDateTime(lastDone.finished_at ?? lastDone.started_at)} (비교군 v{lastDone.peer_version_no}, 주가 기준일 {lastDone.price_as_of ?? '—'})</span>
+              {lastDone.summary?.verdict && <Badge tone={VERDICT_TONE[lastDone.summary.verdict] ?? 'slate'}>{lastDone.summary.verdict}</Badge>}
+              {lastDone.summary?.fair_value?.base != null && <span className="tabular text-slate-600 dark:text-slate-300">적정주가(기준) {won(lastDone.summary.fair_value.base)} · 현재가 {won(lastDone.summary.price)}</span>}
+            </div>
+            {project.peer_state.needs_reanalysis && <div className="mt-1 text-xs text-amber-700 dark:text-amber-400">비교군이 v{no}로 바뀌어 이 결과는 이전 비교군(v{lastDone.peer_version_no}) 기준입니다. 재분석을 권장합니다.</div>}
+          </div>
+          <Button variant="primary" onClick={() => nav(`/projects/${pid}/results?run=${lastDone.id}`)}>STEP 3 결과 보기 →</Button>
+        </Card>
+      )}
+      {latest?.status === 'failed' && !active && (
+        <Notice tone="red">최근 분석 실행이 실패했습니다: {latest.summary?.verdict_reason ?? '아래 실행 로그를 확인하세요.'} {lastDone && '— 이전 성공 결과는 STEP 3에서 계속 볼 수 있습니다.'}</Notice>
+      )}
       {project.peer_state.draft_dirty && <Notice>STEP 1 작업본이 확정본(v{no})과 다릅니다. 변경을 반영하려면 STEP 1에서 다시 확정하세요.</Notice>}
       {project.peer_state.needs_reanalysis && !active && <Notice tone="blue">비교군 v{no}로 아직 분석하지 않았습니다 — 재분석이 필요합니다.</Notice>}
       <Card className="p-5">
