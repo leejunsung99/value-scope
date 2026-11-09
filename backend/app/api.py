@@ -30,6 +30,14 @@ def make_ai():
     return get_provider(get_settings())
 
 
+def make_monitor():
+    """공시알람 DB(읽기 전용). 설정이 없으면 None. (테스트에서 교체)"""
+    from app.services.monitor_source import MonitorSource
+
+    m = MonitorSource(get_settings().dart_monitor_database_url)
+    return m if m.enabled else None
+
+
 def get_dart() -> DartClient:
     return make_dart()
 
@@ -227,8 +235,15 @@ def _run_search_task(project_id: str) -> None:
     gen = _gs()
     db = next(gen)
     try:
+        from app import db as db_module
+        from app.services.budget import CallBudget
+        s = get_settings()
         project = db.get(Project, project_id)
-        run_peer_search(db, project, make_dart(), make_ai())
+        dart = make_dart()
+        budget = CallBudget(db_module._SessionLocal, "DART", s.dart_daily_call_limit)
+        dart.on_call = budget
+        run_peer_search(db, project, dart, make_ai(), monitor=make_monitor(),
+                        budget_remaining=budget.remaining())
     finally:
         gen.close()
 

@@ -54,6 +54,10 @@ class CorpRegistry(Base):
     stock_code: Mapped[str | None] = mapped_column(String(6), index=True)
     modify_date: Mapped[str | None] = mapped_column(String(8))
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # 업종코드 색인(비교기업 후보 확장 탐색용) — OpenDART 기업개황에서 채움
+    induty_code: Mapped[str | None] = mapped_column(String(10), index=True)
+    corp_cls: Mapped[str | None] = mapped_column(String(1))
+    induty_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class Company(TimestampMixin, Base):
@@ -150,7 +154,8 @@ class PeerCandidate(Base):
     company_id: Mapped[int] = mapped_column(ForeignKey("companies.id"))
     category: Mapped[str] = mapped_column(String(1))  # A..E
     use_type: Mapped[str] = mapped_column(String(30))  # valuation|industry_reference|tech_competition
-    # seed = 초기 후보 목록, report_mention = 사업보고서 본문 언급, ai = AI 추천
+    # seed = 초기 후보 목록, report_mention = 사업보고서 본문 언급, ai = AI 추천,
+    # industry = 업종코드 탐색, customer = 고객사 중복 계약
     origin: Mapped[str] = mapped_column(String(20))
     main_business: Mapped[str | None] = mapped_column(Text)
     main_products: Mapped[str | None] = mapped_column(Text)

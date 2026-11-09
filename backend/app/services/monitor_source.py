@@ -67,3 +67,42 @@ class MonitorSource:
             rows = c.execute("SELECT stock_code, as_of, market_cap FROM krx_market_caps WHERE stock_code = ANY(%s)",
                              (stock_codes,)).fetchall()
         return {(r[0], r[1].strftime("%Y%m%d")): float(r[2]) for r in rows}
+
+    # ---- 비교기업 후보 확장 탐색용 (읽기 전용)
+    def corp_classes(self) -> dict[str, str]:
+        """corp_code → corp_cls (Y=KOSPI, K=KOSDAQ, N=KONEX, E=기타)."""
+        with self._conn() as c:
+            rows = c.execute("SELECT corp_code, corp_cls FROM companies WHERE corp_cls IS NOT NULL").fetchall()
+        return {r[0]: r[1] for r in rows}
+
+    def latest_market_caps(self) -> dict[str, float]:
+        """stock_code → 가장 최근 시가총액."""
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT DISTINCT ON (stock_code) stock_code, market_cap FROM krx_market_caps
+                   ORDER BY stock_code, as_of DESC""").fetchall()
+        return {r[0]: float(r[1]) for r in rows if r[1]}
+
+    def contracts_since(self) -> str | None:
+        with self._conn() as c:
+            d = c.execute("SELECT min(rcept_date) FROM disclosures WHERE data->>'counterparty' IS NOT NULL").fetchone()[0]
+        return d.strftime("%Y%m%d") if d else None
+
+    def contract_counterparties(self) -> list[dict]:
+        """공시알람이 구조화해 둔 단일판매·공급계약 공시의 계약상대방 목록."""
+        with self._conn() as c:
+            rows = c.execute(
+                """SELECT corp_code, stock_code, corp_name, rcept_no, rcept_date, report_name,
+                          data->>'counterparty', data->'summary'->'items'
+                   FROM disclosures
+                   WHERE data->>'counterparty' IS NOT NULL AND stock_code IS NOT NULL AND stock_code <> ''""").fetchall()
+        out = []
+        for r in rows:
+            desc = None
+            for it in (r[7] or []):
+                if isinstance(it, dict) and it.get("label") == "계약 내용":
+                    desc = it.get("value")
+            out.append({"corp_code": r[0], "stock_code": r[1], "corp_name": (r[2] or "").strip(), "rcept_no": r[3],
+                        "rcept_date": r[4].strftime("%Y%m%d") if r[4] else None, "report_name": (r[5] or "").strip(),
+                        "counterparty": r[6], "description": desc})
+        return out

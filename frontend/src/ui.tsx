@@ -25,6 +25,8 @@ export const MARKET_LABELS: Record<string, string> = {
 export const ORIGIN_LABELS: Record<string, string> = {
   seed: '초기 후보',
   report_mention: '검색 발견',
+  industry: '업종코드 탐색',
+  customer: '고객사 중복 계약',
   ai: 'AI 추천',
   user: '사용자 추가',
 }

@@ -19,6 +19,7 @@ from app.models_analysis import (AnalysisEvidence, AnalysisReport, AnalysisRun, 
 from app.services import collect_disclosures as cd
 from app.services import collect_financials as cf
 from app.services import engine as eng
+from app.services import news as news_svc
 from app.services.ai import AIProvider, NoAIProvider
 from app.services.backlog import official_backlog
 from app.services.budget import BudgetExceeded, CallBudget
@@ -77,7 +78,7 @@ class RunLog:
         self.db.commit()
 
 
-def create_run(db: Session, project: Project, ai: AIProvider) -> AnalysisRun:
+def create_run(db: Session, project: Project, ai: AIProvider, include_news: bool = True) -> AnalysisRun:
     group = project.peer_group
     if not group or not group.versions:
         raise ValueError("확정된 비교군이 없습니다. STEP 1에서 비교기업을 확정하세요.")
@@ -91,14 +92,15 @@ def create_run(db: Session, project: Project, ai: AIProvider) -> AnalysisRun:
         for m in version.members]
     run = AnalysisRun(project_id=project.id, peer_version_id=version.id, peer_version_no=version.version_no, status="queued",
                       model_version=eng.MODEL_VERSION, ai_provider=ai.name, ai_model=getattr(ai, "model", None),
-                      progress={"stage": "대기", "companies": {str(c["company_id"]): {**c, "steps": {}} for c in companies}})
+                      progress={"stage": "대기", "options": {"include_news": include_news},
+                                "companies": {str(c["company_id"]): {**c, "steps": {}} for c in companies}})
     db.add(run)
     db.commit()
     return run
 
 
 def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, krx: KrxClient, ai: AIProvider,
-                monitor: MonitorSource, today: date | None = None) -> None:
+                monitor: MonitorSource, today: date | None = None, news_searcher=None) -> None:
     today = today or date.today()
     db = session_factory()
     run = db.get(AnalysisRun, run_id)
@@ -178,6 +180,39 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
             price_ok = False
         if not price_ok:
             rl.msg("warning", "주가 최신화 실패 — 이미 저장된 시세로 분석을 계속합니다.")
+
+        # ---------------------------------------------------------- 2b. news (Claude 웹검색, 보조 근거)
+        news_res, news_specs = None, []
+        include_news = (run.progress or {}).get("options", {}).get("include_news", True)
+        if not include_news:
+            rl.msg("info", "뉴스 검색 제외(사용자 선택)")
+        elif news_searcher is None:
+            rl.msg("info", "뉴스 검색 사용 불가(AI_PROVIDER=claude_cli 필요) — 공시 기반으로만 분석합니다.")
+        else:
+            news_specs = news_svc.build_plan(db, project.id, target, list(version.members))
+            rl.stage("뉴스 검색", f"{len(news_specs)}건 (고객사·비교기업·전방산업, {getattr(news_searcher, 'model', '')})")
+            for sp in news_specs:
+                if sp.company_id:
+                    rl.step(sp.company_id, "news", "running")
+            done: list[str] = []
+
+            def _news_progress(label: str) -> None:
+                done.append(label)
+                rl.stage("뉴스 검색", f"{len(done)}/{len(news_specs)} · {label}")
+
+            news_res = news_svc.run_searches(db, news_searcher, news_specs, today, s.news_daily_search_limit, progress=_news_progress)
+            olabel = {"searched": "검색", "cached": "오늘 검색 결과 재사용", "skipped_limit": "일일 검색 상한 초과로 건너뜀", "failed": "실패"}
+            for o in news_res.outcomes:
+                n = len(news_res.items.get(o.spec.query_key, []))
+                detail = (f"{olabel[o.status]} · 기사 {n}건" + (f" (신규 {o.new_items})" if o.status == "searched" else "")
+                          + (f" — {o.error[:120]}" if o.error else ""))
+                if o.spec.company_id:
+                    st_ = "failed" if o.status == "failed" else ("skipped" if o.status == "skipped_limit" else "done")
+                    rl.step(o.spec.company_id, "news", st_, detail)
+                if o.status in ("failed", "skipped_limit"):
+                    rl.msg("warning", f"뉴스 {o.spec.label}: {detail}")
+            counts = {k: sum(1 for o in news_res.outcomes if o.status == k) for k in olabel}
+            rl.msg("info", f"뉴스 검색: 검색 {counts['searched']} · 재사용 {counts['cached']} · 상한 초과 {counts['skipped_limit']} · 실패 {counts['failed']}")
 
         # ---------------------------------------------------------- 3~5. compute
         rl.stage("지표·가치평가 계산")
@@ -336,6 +371,64 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
                        rcept_no=d["disclosures"][0]["rcept_no"] if d["disclosures"] else None,
                        impact=d["classification"] + (" — 근접 공시: " + "; ".join(f"{x['rcept_dt']} {x['report_nm']}" for x in d["disclosures"]) if d["disclosures"] else ""),
                        detail={"disclosures": d["disclosures"], "idiosyncratic": d["idiosyncratic"]})
+        # ---- news events -> evidence, 주가 급변일 연결, 이슈 타임라인
+        news_events: list[dict] = []
+        news_eids: list[str] = []
+        by_cid = {c.id: c for c in companies}
+        if news_res is not None:
+            for sp in news_specs:
+                evs = news_svc.group_events(news_res.items.get(sp.query_key, []))
+                news_svc.match_disclosures(db, evs)
+                for e in evs:
+                    e["scope"], e["scope_label"], e["role"] = sp.query_key, sp.label, sp.role
+                    comp = by_cid.get(e["company_id"]) if e.get("company_id") else None
+                    who = comp.name if comp else (e.get("about") or sp.label)
+                    arts = e["articles"]
+                    disc = e.get("disclosure")
+                    e["eid"] = ev.add(
+                        "news", f"{who} 뉴스: {e['event']}"[:200], None, None,
+                        f"{e['date'] or '날짜 미상'}{'' if e['date_certain'] else '(추정)'} {e['event']}"[:100],
+                        as_of=e["date"], company=comp,
+                        method=(f"{e['summary']} | 보도 {len(arts)}건: " + ", ".join(e["outlets"][:5])
+                                + f" | {news_svc.VERIFICATION_LABEL[e['verification']]}"
+                                + (f"({disc['rcept_dt']} {disc['report_nm']})" if disc else "")
+                                + ("" if e["date_certain"] else " | 보도일 추정")),
+                        source="언론 보도(Claude 웹검색, 링크 확인)", url=arts[0]["url"],
+                        rcept_no=(disc or {}).get("rcept_no"),
+                        impact=f"{news_svc.SENTIMENT_LABEL.get(e['sentiment'], '중립')} · {news_svc.VERIFICATION_LABEL[e['verification']]}",
+                        detail={"articles": arts, "disclosure": disc, "sentiment": e["sentiment"],
+                                "verification": e["verification"], "date_certain": e["date_certain"], "scope": sp.label})
+                    news_eids.append(e["eid"])
+                    news_events.append(e)
+            # 공시가 없는 주가 급변일에 같은 시기(당일~2일 전) 기사 연결
+            if ta.get("available"):
+                tnews = [e for e in news_events if e.get("company_id") == target.id and e.get("date")]
+                for d in ta.get("abnormal_days", []):
+                    dd = date.fromisoformat(d["date"])
+                    near = [e for e in tnews if 0 <= (dd - date.fromisoformat(e["date"])).days <= 2]
+                    d["news"] = [{"event": e["event"], "date": e["date"], "url": e["articles"][0]["url"],
+                                  "outlets": e["outlets"][:3], "eid": e["eid"]} for e in near]
+                    if near and not d["disclosures"]:
+                        d["classification"] = "언론 보도와 시간적 근접(공시 없음, 인과관계 미확정)"
+                attributions[target.id] = ta
+        issues: list[dict] = []
+        for c in companies:
+            if not c.corp_code:
+                continue
+            days_back = 183 if c.id == target.id else 92
+            for row in news_svc.disclosure_timeline(db, c, (today - timedelta(days=days_back)).isoformat(),
+                                                    limit=40 if c.id == target.id else 10):
+                issues.append({**row, "role": "target" if c.id == target.id else "peer"})
+        for e in news_events:
+            if e.get("date"):
+                who = by_cid[e["company_id"]].name if e.get("company_id") in by_cid else (e.get("about") or e["scope_label"])
+                issues.append({"date": e["date"], "date_certain": e["date_certain"], "company": who,
+                               "company_id": e.get("company_id"), "type": "news", "title": e["event"], "url": e["articles"][0]["url"],
+                               "outlets": e["outlets"][:4], "articles": len(e["articles"]), "sentiment": e["sentiment"],
+                               "verification": e["verification"], "disclosure": e.get("disclosure"), "summary": e["summary"],
+                               "eid": e["eid"], "scope": e["scope_label"], "role": e["role"]})
+        issues.sort(key=lambda x: x["date"], reverse=True)
+
         for c in companies:
             if c.id in series:
                 for k in ("1M", "3M", "6M", "1Y", "3Y"):
@@ -365,7 +458,8 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
                    "op_eid": tm.eids.get("operating_income_ttm"), "opm_eid": tm.eids.get("op_margin"),
                    "growth_eid": tm.eids.get("revenue_growth"),
                    "peer_eid": tv["peer"].get("eid") if tv else None, "fair_value_eid": tv["combined"].get("eid") if tv else None,
-                   "confidence_eid": tv["combined"].get("confidence_eid") if tv else None, "attr_eid": attr_eid}
+                   "confidence_eid": tv["combined"].get("confidence_eid") if tv else None, "attr_eid": attr_eid,
+                   "news_eids": news_eids, "news_searched": news_res is not None}
         rl.stage("AI 분석 보고서 작성", f"{ai.name}")
         rep = generate_report(ai, payload, ev.items)
         rl.msg("info" if rep["status"] == "generated" else "warning",
@@ -416,7 +510,8 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
                     db.add(ValuationScenario(valuation_id=val.id, method="combined", scenario=sc, per_share=ps,
                                              detail={"weights": v["combined"]["weights"]}))
         db.add(AnalysisReport(run_id=run.id, status=rep["status"], ai_model=rep["ai_model"], content=clean(rep["content"]), review=clean(rep["review"])))
-        run.charts = clean(build_charts(companies, target, cm, series, proxies, latest_date, valuations, backlog_info, members))
+        run.charts = clean({**build_charts(companies, target, cm, series, proxies, latest_date, valuations, backlog_info, members),
+                            "issues": issues, "news_enabled": news_res is not None})
         run.summary = clean({"verdict": payload["verdict"], "verdict_reason": payload["verdict_reason"], "fair_value": payload["fair_value"],
                        "confidence": payload["confidence"], "price": payload["price"], "price_date": payload["price_date"],
                        "market_cap": tm.values.get("market_cap"), "upside_base": tv["combined"].get("upside_base") if tv else None,
@@ -426,7 +521,10 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
                            "verdict_rule": "현재가 < 보수적 → 저평가, > 낙관적 → 고평가, 그 사이 → 적정. 방법 2개 미만·신뢰도 40 미만 → 판단 유보",
                            "market_index": "KRX 일별매매정보 기반 시가총액가중 대용지수 (공식 지수 API 미승인)",
                            "price_adjustment": "KRX 수정주가 미제공 — 상장주식수 변동으로 분할·병합 보정",
-                           "fiscal_year": "12월 결산 가정"}
+                           "fiscal_year": "12월 결산 가정",
+                           "news": ("Claude 웹검색(가벼운 모델)으로 기사 제목·언론사·날짜·링크만 수집, 링크 확인 후 사건별로 묶음. "
+                                    "공시 대조로 '공시로 확인/기사로만 확인' 구분. 보조 근거이며 적정가 계산에는 미사용")
+                                   if news_res is not None else "뉴스 미사용"}
         run.data_versions = clean({"price_as_of": run.price_as_of,
                              "financials": {cm[c.id].name: fs_map[c.id].latest_quarter() for c in companies},
                              "peer_version": run.peer_version_no})

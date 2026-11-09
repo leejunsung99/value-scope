@@ -31,7 +31,14 @@ MAX_MULTIPLE_DISPERSION = 3.0
 MAX_RANGE_RATIO = 3.0
 # 방법별 기준값의 최대/최소 비율이 이 값을 넘으면 방법 간 결론 불일치 → 판단 유보.
 MAX_METHOD_DISAGREEMENT = 3.0
-EARNINGS_KEYS = {"ev_ebit_norm", "pe_norm", "ev_ebit", "per"}
+EARNINGS_KEYS = {"ev_ebit_norm", "pe_norm", "ev_ebit", "per", "per_adj"}
+# 고객사 TTM 영업이익 ÷ 정상(5년 평균) EBIT 가 이 값 이상이면 사업 규모가 구조적으로 커진 것으로 보고
+# 상대평가 이익 기준을 TTM으로 전환한다 (5년 평균에 비교기업 배수를 곱하면 과소평가되므로).
+SCALE_SWITCH_RATIO = 2.0
+PEER_PLANS = {
+    "normalized": [("ev_ebit_norm", "ebit_norm", "EV/정상EBIT", "ev"), ("pe_norm", "ni_core_norm", "정상 P/E", "eq")],
+    "ttm": [("ev_ebit", "operating_income_ttm", "EV/EBIT(TTM)", "ev"), ("per_adj", "core_ni_ttm", "조정 P/E(TTM)", "eq")],
+}
 
 
 def dispersion(qs: dict, vals: list[float] | None = None) -> float | None:
@@ -303,6 +310,7 @@ def _per_share(equity: float | None, mv: dict) -> float | None:
 OUTLIER_FACTOR = 2.5   # 가중 중앙값 대비 2.5배 밖이면 이상치
 MIN_PEERS_AFTER_TRIM = 3
 QUALITY_METRICS = [("margin_norm", "정상 영업이익률"), ("roe_norm", "정상 ROE"), ("revenue_growth", "매출 성장률(TTM)")]
+QUALITY_METRICS_TTM = [("op_margin", "영업이익률(TTM)"), ("roe", "ROE(TTM)"), ("revenue_growth", "매출 성장률(TTM)")]
 
 
 def _wquantile(vals: list[float], weights: list[float], q: float) -> float:
@@ -323,11 +331,11 @@ def _wquantile(vals: list[float], weights: list[float], q: float) -> float:
     return pts[-1][1]
 
 
-def quality_percentile(target: CompanyMetrics, peers: list[CompanyMetrics]) -> dict:
+def quality_percentile(target: CompanyMetrics, peers: list[CompanyMetrics], metrics=None) -> dict:
     """고객사가 비교군 안에서 몇 번째 수준인지(가중 백분위). 지표별 + 평균."""
     out = {"metrics": {}, "percentile": None}
     ps = []
-    for key, label in QUALITY_METRICS:
+    for key, label in (metrics or QUALITY_METRICS):
         tv = target.values.get(key)
         pv = [(p.values.get(key), p.weight) for p in peers if p.values.get(key) is not None]
         if tv is None or len(pv) < 2:
@@ -344,26 +352,9 @@ def quality_percentile(target: CompanyMetrics, peers: list[CompanyMetrics]) -> d
     return out
 
 
-def method_peer(target: CompanyMetrics, peers: list[CompanyMetrics], ev: Evidence) -> dict:
-    """B. 동종업계 상대평가 (비교군 활용 규칙 v2).
-
-    1) 비교군 가중치 = STEP 1 적합성 점수(없으면 50) × 활용구분(적정가치 비교용 1.0 · 산업 참고용 0.5)
-    2) 배수: EV/정상EBIT, 정상 P/E  (PBR÷ROE는 수학적으로 P/E와 같아 중복이므로 쓰지 않음)
-    3) 이상치: 가중 중앙값 대비 2.5배 밖 제외, 남은 비교기업 3개 미만이면 그 배수 미사용
-    4) 기준 배수 = 고객사 품질 백분위 p(정상 이익률·ROE·성장률 평균, 25~75%로 제한)의 비교군 가중 분위수
-       보수 = p−25%p 분위수, 낙관 = p+25%p 분위수 (품질 위치를 중심으로 한 시나리오)
-    5) 이상치 제거 후에도 분산(표본 6개 미만은 최대/최소)이 3배를 넘으면 사용하되 '신뢰도 낮음'
-    """
+def _peer_multiples(plans, target: CompanyMetrics, peers: list[CompanyMetrics], p_used: float, res: dict):
+    """비교군 배수 산출(가중치·이상치 제거·품질 백분위). (used, low_rel) 반환. notes/excluded는 res에 기록."""
     mv = target.values
-    res = {"method": "peer", "label": METHOD_LABEL["peer"], "available": False, "scenarios": {}, "notes": [], "inputs": [],
-           "rules": "가중치·이상치 제거·ROE 보정 PBR·품질 백분위 배수"}
-    qual = quality_percentile(target, peers)
-    res["quality"] = qual
-    p_raw = qual["percentile"]
-    p_used = min(0.75, max(0.25, p_raw)) if p_raw is not None else 0.5
-    res["quality_percentile_used"] = p_used
-    plans = [("ev_ebit_norm", "ebit_norm", "EV/정상EBIT", "ev"),
-             ("pe_norm", "ni_core_norm", "정상 P/E", "eq")]
     used, low_rel = [], False
     for key, base_key, label, kind in plans:
         base = mv.get(base_key)
@@ -405,6 +396,60 @@ def method_peer(target: CompanyMetrics, peers: list[CompanyMetrics], ev: Evidenc
                      "peers": [{"name": n, "value": v, "weight": w, "eid": i} for n, v, w, i in kept],
                      "dropped": [{"name": n, "value": v} for n, v, _, _ in dropped],
                      "weighted_median": med, "quantiles": qs, "results": per, "base_eid": target.eids.get(base_key)})
+    return used, low_rel
+
+
+def method_peer(target: CompanyMetrics, peers: list[CompanyMetrics], ev: Evidence) -> dict:
+    """B. 동종업계 상대평가 (비교군 활용 규칙 v2).
+
+    1) 비교군 가중치 = STEP 1 적합성 점수(없으면 50) × 활용구분(적정가치 비교용 1.0 · 산업 참고용 0.5)
+    2) 배수: EV/정상EBIT, 정상 P/E  (PBR÷ROE는 수학적으로 P/E와 같아 중복이므로 쓰지 않음)
+       단, 고객사 TTM 영업이익 ÷ 정상 EBIT ≥ 2배(규모 구조적 확대)이면 EV/EBIT(TTM)·조정 P/E(TTM)로 전환
+    3) 이상치: 가중 중앙값 대비 2.5배 밖 제외, 남은 비교기업 3개 미만이면 그 배수 미사용
+    4) 기준 배수 = 고객사 품질 백분위 p(정상 이익률·ROE·성장률 평균, 25~75%로 제한)의 비교군 가중 분위수
+       보수 = p−25%p 분위수, 낙관 = p+25%p 분위수 (품질 위치를 중심으로 한 시나리오)
+    5) 이상치 제거 후에도 분산(표본 6개 미만은 최대/최소)이 3배를 넘으면 사용하되 '신뢰도 낮음'
+    """
+    mv = target.values
+    res = {"method": "peer", "label": METHOD_LABEL["peer"], "available": False, "scenarios": {}, "notes": [], "inputs": [],
+           "rules": "가중치·이상치 제거·이익 기준 자동 선택(정상화/TTM)·품질 백분위 배수"}
+    # 이익 기준 선택: 고객사 사업 규모가 5년 평균 대비 구조적으로 커졌으면 TTM 기준 배수 사용
+    ttm_ebit, norm_ebit = mv.get("operating_income_ttm"), mv.get("ebit_norm")
+    scale = ttm_ebit / norm_ebit if (ttm_ebit and norm_ebit and norm_ebit > 0 and ttm_ebit > 0) else None
+    res["scale_ratio"] = scale
+    basis = "ttm" if scale is not None and scale >= SCALE_SWITCH_RATIO else "normalized"
+    res["basis"] = basis
+
+    def _quality(metrics):
+        q = quality_percentile(target, peers, metrics)
+        pr = q["percentile"]
+        return q, pr, (min(0.75, max(0.25, pr)) if pr is not None else 0.5)
+
+    qual, p_raw, p_used = _quality(QUALITY_METRICS)
+    norm_res = {"notes": []}
+    norm_used, norm_low = _peer_multiples(PEER_PLANS["normalized"], target, peers, p_used, norm_res)
+    res["inputs_norm"] = norm_used  # 미래이익 평가(정상화 기준)에서 재사용
+    if basis == "ttm":
+        res["basis_note"] = (f"이익 기준 TTM 전환: 고객사 TTM 영업이익 {fmt_krw(ttm_ebit)}이 {int(mv.get('norm_quarters') or 20)}개 분기 평균"
+                             f" {fmt_krw(norm_ebit)}의 {scale:.1f}배(≥{SCALE_SWITCH_RATIO:g}배) — 사업 규모가 커져 5년 평균에 배수를 곱하면 과소평가되므로"
+                             f" 비교기업·고객사 모두 TTM(경상) 이익 기준 배수 사용")
+        res["notes"].append(res["basis_note"])
+        qual_t, p_raw_t, p_used_t = _quality(QUALITY_METRICS_TTM)
+        used, low_rel = _peer_multiples(PEER_PLANS["ttm"], target, peers, p_used_t, res)
+        if used:
+            qual, p_raw, p_used = qual_t, p_raw_t, p_used_t
+        if not used:
+            res["notes"].append("TTM 기준 배수를 산출할 비교기업이 부족해 정상화(5년 평균) 기준으로 대체")
+            res["basis"] = "normalized"
+            res["notes"].extend(norm_res["notes"])
+            res.setdefault("excluded", []).extend(norm_res.get("excluded", []))
+            used, low_rel = norm_used, norm_low
+    else:
+        res["notes"].extend(norm_res["notes"])
+        res.setdefault("excluded", []).extend(norm_res.get("excluded", []))
+        used, low_rel = norm_used, norm_low
+    res["quality"] = qual
+    res["quality_percentile_used"] = p_used
     if not used:
         # 최후 대체: 매출·자산 배수 (이익 기반 아님 → 단독으로는 판단 근거가 되지 않음)
         for key, base_key, label in [("ev_sales", "revenue_ttm", "EV/Sales"), ("pbr", "equity_owners", "PBR")]:
@@ -448,7 +493,7 @@ def method_peer(target: CompanyMetrics, peers: list[CompanyMetrics], ev: Evidenc
     res["eid"] = ev.add("estimate", f"{target.name} 동종업계 상대평가 주당가치(기준)", b, "KRW/주", f"{b:,.0f}원" if b else "N/A",
                         company=None, method=method_txt, source="ValueScope 계산",
                         impact="동종업계 대비 적정가치 기준점",
-                        detail={"inputs": used, "quality": qual, "quality_percentile_used": p_used, "notes": res["notes"]})
+                        detail={"inputs": used, "basis": res["basis"], "scale_ratio": scale, "quality": qual, "quality_percentile_used": p_used, "notes": res["notes"]})
     ev.items[-1]["method"] = ((ev.items[-1]["method"] or "") + (f" (지표별: {qtxt})" if qtxt else "")
                               + " | 규칙: 가중치=적합성점수×활용구분, 이상치(중앙값 2.5배 밖) 제외, 기준배수=품질 백분위 p(25~75%), 보수/낙관=p∓25%p"
                               + "".join(f" | {n}" for n in res["notes"]))
@@ -542,9 +587,13 @@ def method_forward(target: CompanyMetrics, fs: FinSeries, schedule: dict, peer_r
     opm = {"conservative": lo, "base": m3, "optimistic": hi}
     mult_src = None
     for src in (peer_res, hist_res):
-        comp = next((u for u in src.get("inputs", []) if u["key"] == "ev_ebit_norm"), None)
+        comp = next((u for u in (src.get("inputs_norm") or src.get("inputs", [])) if u["key"] == "ev_ebit_norm"), None)
         if comp:
-            mult_src = (src["label"] + " EV/정상EBIT", comp["quantiles"])
+            from_norm = bool(src.get("inputs_norm")) and src.get("basis") == "ttm"
+            peers_txt = ", ".join(f"{p_['name']} {p_['value']:.1f}" for p_ in comp.get("peers", []) or [])
+            mult_src = (src["label"] + " EV/정상EBIT"
+                        + (" (정상화 기준 — 상대평가 본 산식은 TTM 기준으로 전환됨)" if from_norm else "")
+                        + (f": {peers_txt}" if peers_txt else ""), comp["quantiles"])
             break
     if not mult_src:
         exc = next((x for x in peer_res.get("excluded", []) if x["multiple"] == "EV/정상EBIT" and len(x.get("peers", [])) >= 2), None)
@@ -592,7 +641,7 @@ def method_forward(target: CompanyMetrics, fs: FinSeries, schedule: dict, peer_r
     b = res["scenarios"]["base"]
     res["eid"] = ev.add("estimate", f"{target.name} 미래이익(수주 납기) 기반 주당가치(기준)", b["per_share"], "KRW/주",
                         f"{b['per_share']:,.0f}원" if b["per_share"] else "N/A",
-                        method=f"향후 12개월 납기 도래 수주잔고 {fmt_krw(b['forward_revenue'])} × 영업이익률 {opm['base']:.1%}(12분기 평균)"
+                        method=f"향후 12개월 납기 도래 수주잔고 {fmt_krw(b['forward_revenue'])} × 영업이익률 {opm['base']:.1%}({nq}개 분기 평균)"
                                f" = 향후 영업이익 {fmt_krw(b['forward_ebit'])} → 정상 EBIT 환산 (최근 {past_q}분기 {fmt_krw(op8)} + 향후) ÷ {years:g}"
                                f" = {fmt_krw(b['forward_ebit_norm'])} × EV/정상EBIT {m_base:.1f}배({mult_src[0]}) − 순차입금 − 비지배지분 → 주당가치",
                         source="ValueScope 추정(명시적 가정)", impact="수주 납기 기반 향후 이익 반영",

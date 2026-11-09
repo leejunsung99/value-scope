@@ -202,3 +202,55 @@ def test_budget_stops_collection(client, db, monkeypatch):
     db.expire_all()
     r = db.get(AnalysisRun, run.id)
     assert r.status == "failed" and any("호출 상한" in m["message"] for m in r.messages)
+
+
+class FakeNewsSearcher:
+    model = "fake-news"
+
+    def search(self, spec, since, until):
+        if spec.role == "target":
+            return [{"pub_date": "2026-10-21", "date_certain": True, "outlet": "뉴스핌", "title": "선익시스템 OLEDoS 장비 추가 수주",
+                     "url": "https://news.example.kr/a", "summary": "추가 수주 보도", "event": "OLEDoS 추가 수주",
+                     "sentiment": "positive", "about": "선익시스템"},
+                    {"pub_date": "2026-10-22", "date_certain": False, "outlet": "디일렉", "title": "선익시스템 수주 확대",
+                     "url": "https://news.example.kr/b", "summary": "", "event": "OLEDoS 추가 수주",
+                     "sentiment": "positive", "about": "선익시스템"}]
+        if spec.role == "theme":
+            return [{"pub_date": "2026-09-01", "date_certain": True, "outlet": "전자신문", "title": "패널사 8.6세대 투자",
+                     "url": "https://news.example.kr/c", "summary": "투자 보도", "event": "8.6세대 OLED 투자",
+                     "sentiment": "positive", "about": "BOE"}]
+        return []
+
+
+def test_pipeline_with_news(client, db, monkeypatch):
+    from app.models import Project
+    from app.services import news as news_mod
+    from app.services.ai import NoAIProvider
+
+    monkeypatch.setattr(news_mod, "check_link", lambda url, c: "ok")
+    pid = _setup_project(client)
+    project = db.get(Project, pid)
+    run = create_run(db, project, NoAIProvider())
+    execute_run(db_module._SessionLocal, run.id, PipelineDart(), FakeKrx(), NoAIProvider(), NoMonitor(), today=TODAY,
+                news_searcher=FakeNewsSearcher())
+    db.expire_all()
+    r = db.get(AnalysisRun, run.id)
+    assert r.status in ("succeeded", "partial"), r.messages
+    res = client.get(f"/api/projects/{pid}/analysis-runs/{run.id}/results").json()
+    issues = [i for i in res["charts"]["issues"] if i["type"] == "news"]
+    assert res["charts"]["news_enabled"] is True
+    # two articles about the same event are grouped into one issue
+    oled = [i for i in issues if i["title"] == "OLEDoS 추가 수주"]
+    assert len(oled) == 1 and oled[0]["articles"] == 2 and oled[0]["company"] == "선익시스템"
+    assert any(i["scope"] == "전방산업·고객사" for i in issues)
+    ev = client.get(f"/api/projects/{pid}/analysis-runs/{run.id}/evidence").json()
+    news_ev = [e for e in ev if e["kind"] == "news"]
+    assert news_ev and all(e["url"] and e["source"].startswith("언론 보도") for e in news_ev)
+    keys = [s["key"] for s in res["report"]["content"]["sections"]]
+    assert "issues" in keys
+    # excluded by user option -> no search
+    run2 = create_run(db, project, NoAIProvider(), include_news=False)
+    execute_run(db_module._SessionLocal, run2.id, PipelineDart(), FakeKrx(), NoAIProvider(), NoMonitor(), today=TODAY,
+                news_searcher=FakeNewsSearcher())
+    db.expire_all()
+    assert db.get(AnalysisRun, run2.id).charts["news_enabled"] is False

@@ -6,7 +6,7 @@ import { analysisApi, krw, pct, VERDICT_TONE, won, type AnalysisRun, type StepSt
 import { Badge, Button, Card, CATEGORY_LABELS, Empty, fmtDateTime, Notice, Spinner, USE_TYPE_LABELS } from '../ui'
 import { useProject } from './ProjectLayout'
 
-const STEP_LABEL: Record<string, string> = { financials: '재무', disclosures: '공시', contracts: '수주', prices: '주가', valuation: '평가' }
+const STEP_LABEL: Record<string, string> = { financials: '재무', disclosures: '공시', contracts: '수주', prices: '주가', news: '뉴스', valuation: '평가' }
 const RUN_STATUS: Record<string, [string, 'blue' | 'green' | 'amber' | 'red' | 'slate']> = {
   queued: ['대기', 'slate'], running: ['분석 중', 'blue'], succeeded: ['완료', 'green'], partial: ['일부 완료', 'amber'], failed: ['실패', 'red'],
 }
@@ -41,7 +41,8 @@ export function Step2Analysis() {
     queryKey: ['run', pid, latest?.id], queryFn: () => analysisApi.run(pid, latest!.id), enabled: !!latest,
     refetchInterval: active ? 2000 : false,
   })
-  const start = useMutation({ mutationFn: () => analysisApi.start(pid), onSuccess: () => qc.invalidateQueries({ queryKey: ['runs', pid] }) })
+  const [includeNews, setIncludeNews] = useState(true)
+  const start = useMutation({ mutationFn: () => analysisApi.start(pid, includeNews), onSuccess: () => qc.invalidateQueries({ queryKey: ['runs', pid] }) })
   const wasActive = useRef(false)
   useEffect(() => {
     if (wasActive.current && !active) {
@@ -95,9 +96,15 @@ export function Step2Analysis() {
               </div>
             )}
           </div>
-          <Button variant="primary" disabled={!!active || start.isPending} onClick={() => start.mutate()}>
-            {active ? <><Spinner /> 분석 진행 중…</> : latest ? '최신화 및 재분석 실행' : '기업 분석 실행'}
-          </Button>
+          <div className="flex flex-col items-end gap-1.5">
+            <Button variant="primary" disabled={!!active || start.isPending} onClick={() => start.mutate()}>
+              {active ? <><Spinner /> 분석 진행 중…</> : latest ? '최신화 및 재분석 실행' : '기업 분석 실행'}
+            </Button>
+            <label className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-400" title="고객사(6개월)·비교기업(3개월)·전방산업 기사를 Claude 웹검색으로 찾습니다. 같은 날 재분석은 검색 결과를 재사용합니다.">
+              <input type="checkbox" checked={includeNews} disabled={!!active} onChange={(e) => setIncludeNews(e.target.checked)} />
+              뉴스 검색 포함 (고객사·비교기업·전방산업)
+            </label>
+          </div>
         </div>
         {start.isError && <div className="mt-2"><Notice tone="red">{(start.error as Error).message}</Notice></div>}
       </Card>

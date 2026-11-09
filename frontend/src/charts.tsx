@@ -4,6 +4,7 @@ import ReactECharts from 'echarts-for-react'
 import { useEffect, useMemo, useState } from 'react'
 import type { Charts, QuarterRow, ScenarioMap } from './apiAnalysis'
 import { krw } from './apiAnalysis'
+import { IS_PRINT } from './print'
 
 const LIGHT = ['#2a78d6', '#eb6834', '#1baf7a', '#eda100', '#e87ba4', '#008300', '#6250d6', '#e34948']
 const DARK = ['#3987e5', '#d95926', '#199e70', '#c98500', '#d55181', '#008300', '#9085e9', '#e66767']
@@ -46,6 +47,7 @@ function base(dark: boolean) {
   const t = theme(dark)
   return {
     backgroundColor: 'transparent',
+    animation: !IS_PRINT,
     textStyle: { color: t.text, fontFamily: 'Pretendard, Malgun Gothic, sans-serif', fontSize: 11 },
     grid: { left: 56, right: 24, top: 36, bottom: 40, containLabel: true },
     tooltip: {
@@ -59,7 +61,9 @@ function base(dark: boolean) {
 }
 
 function Chart({ option, height = 300 }: { option: object; height?: number }) {
-  return <ReactECharts option={option} style={{ height }} notMerge lazyUpdate opts={{ renderer: 'svg' }} />
+  // 인쇄본은 지면이 좁으므로 높이를 줄이고 SVG로 그린다
+  const h = IS_PRINT ? Math.round(Math.min(height, 420) * 0.72) : height
+  return <ReactECharts option={option} style={{ height: h }} notMerge lazyUpdate opts={{ renderer: 'svg' }} />
 }
 
 const eok = (v: number) => `${Math.round(v / 1e8).toLocaleString('ko-KR')}억`
@@ -102,12 +106,13 @@ export function PriceCompareChart({ charts, onlyIds }: { charts: Charts; onlyIds
     <div>
       <RangeTabs value={range} onChange={setRange} options={Object.keys(RANGES)} />
       <Chart option={option} height={340} />
-      <div className="text-[11px] text-slate-500">범례를 클릭해 기업을 표시·숨김할 수 있습니다. 1년 초과 구간은 월말 표본입니다. 분할·병합은 상장주식수 변동으로 보정했습니다.</div>
+      <div className="chart-note text-[11px] text-slate-500">범례를 클릭해 기업을 표시·숨김할 수 있습니다. 1년 초과 구간은 월말 표본입니다. 분할·병합은 상장주식수 변동으로 보정했습니다.</div>
     </div>
   )
 }
 
 export function RangeTabs({ value, onChange, options }: { value: string; onChange: (v: string) => void; options: string[] }) {
+  if (IS_PRINT) return null
   return (
     <div className="mb-1 flex gap-1 text-xs">
       {options.map((o) => (
@@ -294,7 +299,7 @@ export function FairValueChart({ scenarios, price }: { scenarios: Record<string,
         encode: { x: [1, 2, 3], y: 0 },
         data: keys.map((k, i) => ({ value: [i, scenarios[k]!.conservative, scenarios[k]!.base, scenarios[k]!.optimistic], range: [scenarios[k]!.conservative, scenarios[k]!.base, scenarios[k]!.optimistic], name: label[k] })),
         markLine: price ? { silent: true, symbol: 'none', data: [{ xAxis: price }], lineStyle: { color: t.palette[7], width: 2 },
-          label: { formatter: `현재가 ${Math.round(price).toLocaleString()}원`, color: t.textStrong } } : undefined,
+          label: { formatter: `현재가 ${Math.round(price).toLocaleString()}원`, color: t.textStrong, position: 'start', rotate: 0, distance: 6 } } : undefined,
       },
     ],
   }

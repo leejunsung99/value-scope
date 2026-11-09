@@ -4,6 +4,7 @@ from __future__ import annotations
 import threading
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -28,12 +29,25 @@ def make_clients():
     return DartClient(s.dart_api_key), KrxClient(s.krx_api_key), make_ai(), MonitorSource(s.dart_monitor_database_url)
 
 
+def make_news_searcher():
+    """뉴스 검색기 (Claude CLI 웹검색). AI_PROVIDER=claude_cli가 아니거나 CLI가 없으면 None. (테스트에서 교체)"""
+    from app.services.news import ClaudeNewsSearcher, NewsUnavailable
+
+    s = get_settings()
+    if (s.ai_provider or "").lower() != "claude_cli":
+        return None
+    try:
+        return ClaudeNewsSearcher(s.news_search_model)
+    except NewsUnavailable:
+        return None
+
+
 def _start_thread(run_id: str) -> None:
     from app.services.analysis import execute_run
 
     dart, krx, ai, monitor = make_clients()
     db_module.get_engine()
-    execute_run(db_module._SessionLocal, run_id, dart, krx, ai, monitor)
+    execute_run(db_module._SessionLocal, run_id, dart, krx, ai, monitor, news_searcher=make_news_searcher())
 
 
 RUN_IN_THREAD = True  # tests set False to run synchronously
@@ -61,14 +75,18 @@ def api_usage(db: Session = Depends(get_session)):
     return usage_summary(db, {"DART": s.dart_daily_call_limit, "KRX": s.krx_daily_call_limit})
 
 
+class StartBody(BaseModel):
+    include_news: bool = True
+
+
 @router.post("/projects/{project_id}/analysis-runs", status_code=202)
-def start_analysis(project_id: str, db: Session = Depends(get_session)):
+def start_analysis(project_id: str, body: StartBody | None = None, db: Session = Depends(get_session)):
     from app.services.analysis import create_run
 
     p = _project(db, project_id)
     _, _, ai, _ = make_clients()
     try:
-        run = create_run(db, p, ai)
+        run = create_run(db, p, ai, include_news=(body.include_news if body else True))
     except ValueError as e:
         raise HTTPException(422, str(e))
     except RuntimeError as e:
@@ -192,3 +210,37 @@ def compare_runs(project_id: str, old_id: str, new_id: str, db: Session = Depend
     return {"old": run_to_dict(a), "new": run_to_dict(b), "rows": rows, "applied_multiples": peer_mult,
             "verdict": {"old": va.verdict, "new": vb.verdict},
             "peer_version": {"old": a.peer_version_no, "new": b.peer_version_no}}
+
+
+# --------------------------------------------------------------------- PDF export
+@router.get("/projects/{project_id}/analysis-runs/{run_id}/report.pdf")
+def export_pdf(project_id: str, run_id: str, db: Session = Depends(get_session)):
+    """인쇄용 보고서 화면을 로컬 Edge/Chrome(headless)으로 PDF 변환해 내려준다."""
+    from datetime import datetime
+    from urllib.parse import quote
+
+    from fastapi.responses import Response
+
+    from app.main import DIST
+    from app.services.pdf_export import PdfUnavailable, render_pdf
+
+    r = _run(db, project_id, run_id)
+    if r.status not in ("succeeded", "partial"):
+        raise HTTPException(409, "완료된 분석만 PDF로 출력할 수 있습니다.")
+    if not (DIST / "index.html").exists():
+        raise HTTPException(409, "빌드된 화면이 없어 서버에서 PDF를 만들 수 없습니다(개발 모드). '브라우저 인쇄로 저장'을 이용하거나 start.ps1 -Rebuild로 실행하세요.")
+    s = get_settings()
+    host = s.app_host if s.app_host in ("127.0.0.1", "localhost") else "127.0.0.1"
+    url = f"http://{host}:{s.app_port}/print/projects/{project_id}/runs/{run_id}"
+    project = db.get(Project, project_id)
+    name = project.company.name if project and project.company else "report"
+    code = (project.company.stock_code if project and project.company else None) or ""
+    day = (r.finished_at or datetime.now()).strftime("%Y%m%d")
+    try:
+        pdf = render_pdf(url, s.pdf_browser_path or None, footer=f"ValueScope  |  {code}  |  {day}  |  Not investment advice")
+    except PdfUnavailable as e:
+        raise HTTPException(503, str(e)) from e
+    fname = f"ValueScope_{name}_{day}.pdf"
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition": f"attachment; filename=\"ValueScope_{day}.pdf\"; filename*=UTF-8''{quote(fname)}",
+                             "Cache-Control": "no-store"})

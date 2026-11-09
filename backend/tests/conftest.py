@@ -67,7 +67,7 @@ class FakeDart:
         self.calls.append(f"company:{corp_code}")
         e = next(e for e in SAMPLE_REGISTRY if e.corp_code == corp_code)
         return {"status": "000", "corp_name": e.corp_name, "stock_code": e.stock_code or "",
-                "corp_cls": "K" if e.stock_code else "E", "induty_code": "29294", "ceo_nm": "테스트", "hm_url": ""}
+                "corp_cls": "K" if e.stock_code else "E", "induty_code": f"9{corp_code[-4:]}", "ceo_nm": "테스트", "hm_url": ""}
 
     def latest_business_report(self, corp_code):
         self._check()
@@ -116,6 +116,10 @@ def client(engine, fake_dart, monkeypatch):
     from app.services.ai import NoAIProvider
 
     monkeypatch.setattr(api_module, "make_dart", lambda: fake_dart)
+    monkeypatch.setattr(api_module, "make_monitor", lambda: None)
+    import app.api_analysis as api_analysis_module
+
+    monkeypatch.setattr(api_analysis_module, "make_news_searcher", lambda: None)
     monkeypatch.setattr(api_module, "make_ai", lambda: NoAIProvider())
     with TestClient(app) as c:
         yield c

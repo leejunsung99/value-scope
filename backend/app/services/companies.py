@@ -35,6 +35,9 @@ def sync_registry(db: Session, dart: DartClient) -> int:
     """Replace the cached corp registry with the latest OpenDART corpCode.xml."""
     entries = dart.corp_codes()
     now = utcnow()
+    # 업종코드 색인은 corpCode.xml에 없으므로 갱신 시 보존한다
+    kept = {r.corp_code: (r.induty_code, r.corp_cls, r.induty_checked_at)
+            for r in db.scalars(select(CorpRegistry).where(CorpRegistry.induty_checked_at.is_not(None)))}
     db.execute(delete(CorpRegistry))
     db.bulk_insert_mappings(
         CorpRegistry,
@@ -46,6 +49,7 @@ def sync_registry(db: Session, dart: DartClient) -> int:
                 "stock_code": e.stock_code,
                 "modify_date": e.modify_date,
                 "fetched_at": now,
+                **dict(zip(("induty_code", "corp_cls", "induty_checked_at"), kept.get(e.corp_code, (None, None, None)))),
             }
             for e in entries
         ],

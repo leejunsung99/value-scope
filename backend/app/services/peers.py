@@ -52,7 +52,8 @@ COMMON_WORD_NAMES = {
     "대상", "디바이스", "서비스", "시스템", "솔루션", "에너지", "케미칼", "테크", "코스모", "미래산업",
     "한국", "대한", "동방", "세원", "신원", "우리", "전방", "전기", "정상", "진원", "태양", "영원",
 }
-MAX_CANDIDATE_REPORTS = 25
+MAX_CANDIDATE_REPORTS = 40
+DISCOVERY_ORIGINS = ("report_mention", "industry", "customer")
 OVERVIEW_EXCERPT_CHARS = 3000
 AI_TARGET_TEXT_CHARS = 150_000
 
@@ -289,7 +290,8 @@ def build_ai_prompt(target: Company, target_text: str, drafts: list[Draft]) -> s
         "3) 원문에 근거가 있는 추가 관련 기업이 있으면 is_new_suggestion=true로 추가하십시오(국내 상장사는 종목코드 포함). "
         "근거가 없으면 추가하지 마십시오.\n"
         "4) 비교 시 주의점(사업 비중 차이, 비상장, 지주사 구조 등)을 caution에 적으십시오.\n"
-        "5) 출처가 '사업보고서 본문 언급'인 후보가 실제로는 일반명사이거나 사업과 무관한 단순 언급이면 "
+        "5) 출처가 report_mention(사업보고서 본문 언급)·industry(업종코드 일치)·customer(같은 고객사와 계약)인 후보는 "
+        "자동 탐색 결과이므로, 후보의 '사업의 개요' 발췌를 근거로 고객사와 실제 사업 관련성이 없거나 일반명사 언급이면 "
         "relevance='unrelated_mention'으로 표시하고 selection_reason에 그 이유를 적으십시오. 그 외에는 'related'."
     )
     return "\n\n".join(parts)
@@ -331,7 +333,7 @@ def apply_ai(
                 continue
             drafts.append(d)
             by_name[company_svc.normalize_name(d.company.name)] = d
-        if item.get("relevance") == "unrelated_mention" and d.origin == "report_mention":
+        if item.get("relevance") == "unrelated_mention" and d.origin in DISCOVERY_ORIGINS:
             dropped.append(f"{d.company.name}({item.get('selection_reason', '').strip()[:80]})")
             drafts.remove(d)
             continue
@@ -393,7 +395,8 @@ def _resolve_ai_suggestion(db: Session, dart: DartClient, item: dict, code: str,
 
 
 # --------------------------------------------------------------------- main
-def run_peer_search(db: Session, project: Project, dart: DartClient, ai: AIProvider | None = None) -> PeerSearchSession:
+def run_peer_search(db: Session, project: Project, dart: DartClient, ai: AIProvider | None = None,
+                    monitor=None, budget_remaining=None) -> PeerSearchSession:
     ai = ai or NoAIProvider()
     slog = SearchLog()
     session = PeerSearchSession(project_id=project.id, rubric_version=RUBRIC_VERSION, status="running",
@@ -401,7 +404,7 @@ def run_peer_search(db: Session, project: Project, dart: DartClient, ai: AIProvi
     db.add(session)
     db.commit()
     try:
-        _run(db, project, session, dart, ai, slog)
+        _run(db, project, session, dart, ai, slog, monitor, budget_remaining)
     except Exception as e:  # noqa: BLE001 - record any failure on the session
         log.exception("peer search failed")
         db.rollback()
@@ -414,7 +417,8 @@ def run_peer_search(db: Session, project: Project, dart: DartClient, ai: AIProvi
     return session
 
 
-def _run(db: Session, project: Project, session: PeerSearchSession, dart: DartClient, ai: AIProvider, slog: SearchLog) -> None:
+def _run(db: Session, project: Project, session: PeerSearchSession, dart: DartClient, ai: AIProvider, slog: SearchLog,
+         monitor=None, budget_remaining=None) -> None:
     target = project.company
     seeds = SEED_CANDIDATES.get(target.stock_code or "", [])
     drafts: dict[int, Draft] = {}
@@ -480,6 +484,10 @@ def _run(db: Session, project: Project, session: PeerSearchSession, dart: DartCl
             )
         slog.info(f"사업보고서 본문에서 상장사 {len(mentions)}개 언급 탐지 — 신규 후보 {new_found}개 추가")
 
+    # 3b) 후보 확장 탐색: 업종코드 · 고객사 중복 계약 (공시 근거가 남는 방법만)
+    if dart_ok:
+        _discover(db, project, dart, drafts, slog, monitor, budget_remaining)
+
     # 4) candidate overviews
     if dart_ok:
         fetched = 0
@@ -540,7 +548,7 @@ def _run(db: Session, project: Project, session: PeerSearchSession, dart: DartCl
     found_ids = {d.company.id for d in draft_list}
     group = get_or_create_group(db, project)
     stale = [m for m in group.memberships
-             if m.status == "proposed" and m.added_by in ("report_mention", "ai") and m.company_id not in found_ids]
+             if m.status == "proposed" and m.added_by in (*DISCOVERY_ORIGINS, "ai") and m.company_id not in found_ids]
     for m in stale:
         m.status = "excluded"
         m.note = f"재검색(세션 {session.id})에서 다시 발견되지 않아 자동 제외 — 필요 시 복원 가능"
@@ -549,6 +557,80 @@ def _run(db: Session, project: Project, session: PeerSearchSession, dart: DartCl
                   + ", ".join(m.company.name for m in stale))
 
     session.status = "succeeded" if dart_ok and target_doc else ("partial" if draft_list else "failed")
+    db.commit()
+
+
+def _discover(db: Session, project: Project, dart: DartClient, drafts: dict, slog: SearchLog, monitor, budget_remaining) -> None:
+    from app.services import peer_discovery as disc
+
+    target = project.company
+    res = disc.DiscoveryResult()
+    exclude = {d.company.corp_code for d in drafts.values() if d.company.corp_code}
+    group = get_or_create_group(db, project)
+    exclude |= {m.company.corp_code for m in group.memberships if m.status == "excluded" and m.added_by == "user" and m.company.corp_code}
+    universe = disc.listed_universe(db, monitor)
+    mcaps = disc.monitor_market_caps(monitor)
+    target_mcap = mcaps.get(target.stock_code or "")
+    # 1) 업종코드
+    if target.induty_code:
+        disc.update_industry_index(db, dart, universe, mcaps, target_mcap, budget_remaining, res)
+        peer_codes = {m.company.name: m.company.induty_code for m in group.memberships
+                      if m.status == "included" and m.use_type == "valuation" and m.company.induty_code}
+        found = disc.industry_candidates(target, peer_codes, universe, mcaps, target_mcap, exclude)
+        added = 0
+        for f in found:
+            try:
+                company = company_svc.upsert_company_from_dart(db, dart, f["corp_code"])
+            except DartError as e:
+                slog.warn(f"업종코드 후보 {f['name']} 기업개황 조회 실패: {e}")
+                continue
+            if company.id == target.id or company.id in drafts or not company.is_listed:
+                continue
+            drafts[company.id] = Draft(
+                company=company, category="B", origin="industry",
+                sources=[{"type": "DART", "title": "OpenDART 기업개황 업종코드", "url": None, "rcept_no": None, "filed_date": None,
+                          "section": None, "note": f["basis"]}],
+                reasons=[f"{f['basis']} (업종코드 탐색으로 새로 발견)"],
+                cautions=["업종코드가 같아도 제품·고객이 다를 수 있음 — 사업의 개요로 실제 관련성을 확인하세요."],
+                verification_status="verified", verification_notes=["DART 기업개황으로 상장 상태·업종코드 확인"],
+            )
+            exclude.add(f["corp_code"])
+            added += 1
+        res.info(f"업종코드 탐색(고객사 {target.induty_code}"
+                 + (f", 확정 비교기업 세부업종 {', '.join(sorted(set(peer_codes.values())))}" if peer_codes else "")
+                 + f"): 신규 후보 {added}개")
+    else:
+        res.warn("고객사 업종코드가 없어 업종코드 탐색을 생략했습니다.")
+    # 2) 고객사 중복 계약
+    found, meta = disc.customer_overlap_candidates(db, monitor, target, exclude)
+    if not meta["target_customers"]:
+        res.info("고객사 계약 공시에서 계약상대방을 확인하지 못해 고객사 중복 계약 탐색을 생략했습니다(STEP 2 수집 후 다시 검색하면 사용).")
+    else:
+        added = 0
+        for f in found:
+            try:
+                company = company_svc.upsert_company_from_dart(db, dart, f["corp_code"])
+            except DartError as e:
+                slog.warn(f"고객사 중복 계약 후보 {f['name']} 기업개황 조회 실패: {e}")
+                continue
+            if company.id == target.id or not company.is_listed:
+                continue
+            reason = f"고객사와 같은 계약상대방({', '.join(f['customers'])})과 공급계약을 공시 ({len(f['refs'])}건)"
+            if company.id in drafts:
+                drafts[company.id].sources.extend(f["refs"])
+                drafts[company.id].reasons.append(reason)
+                continue
+            drafts[company.id] = Draft(
+                company=company, category="B", origin="customer", sources=f["refs"],
+                reasons=[reason + " (고객사 중복 계약 탐색으로 새로 발견)"],
+                cautions=["같은 고객에 공급하더라도 장비·소재·건설 등 공급 품목이 다를 수 있음 — 계약 내용을 확인하세요."],
+                verification_status="verified", verification_notes=["DART 기업개황으로 상장 상태 확인"],
+            )
+            added += 1
+        src = f"공시알람 DB({meta['monitor_since'][:4]}-{meta['monitor_since'][4:6]}-{meta['monitor_since'][6:]} 이후)" if meta.get("monitor_since") else "수집된 계약 공시"
+        res.info(f"고객사 중복 계약 탐색: 고객사 계약상대방 {len(meta['target_customers'])}곳 × {src} 계약 공시 {meta['contracts_scanned']}건 대조 — 신규 후보 {added}개")
+    for level, m in res.messages:
+        (slog.warn if level == "warning" else slog.info)(m)
     db.commit()
 
 

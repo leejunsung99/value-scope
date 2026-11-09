@@ -17,6 +17,32 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 const get = <T>(p: string) => request<T>(p)
 
+/** 서버에서 PDF(로컬 Edge/Chrome headless 변환)를 받아 파일로 저장한다. */
+export async function downloadReportPdf(pid: string, rid: string): Promise<void> {
+  const res = await fetch(`/api/projects/${pid}/analysis-runs/${rid}/report.pdf`)
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`
+    try {
+      const b = await res.json()
+      msg = typeof b.detail === 'string' ? b.detail : JSON.stringify(b.detail)
+    } catch {
+      /* ignore */
+    }
+    throw new Error(msg)
+  }
+  const blob = await res.blob()
+  const m = /filename\*=UTF-8''([^;]+)/.exec(res.headers.get('Content-Disposition') ?? '')
+  const name = m ? decodeURIComponent(m[1]) : 'ValueScope_report.pdf'
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = name
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
+}
+
 export type Scenario = 'conservative' | 'base' | 'optimistic'
 export type ScenarioMap = Partial<Record<Scenario, number | null>>
 
@@ -89,7 +115,7 @@ export interface Attribution {
   market_label?: string
   model?: { beta_market: number; t_market: number; beta_industry: number | null; t_industry: number | null; r2: number; method: string }
   windows?: Record<string, { total: number; market: number; industry: number; individual: number; days: number }>
-  abnormal_days?: { date: string; return: number; idiosyncratic: number; classification: string; disclosures: { rcept_no: string; report_nm: string; rcept_dt: string; url: string }[] }[]
+  abnormal_days?: { date: string; return: number; idiosyncratic: number; classification: string; disclosures: { rcept_no: string; report_nm: string; rcept_dt: string; url: string }[]; news?: { event: string; date: string; url: string; outlets: string[]; eid: string }[] }[]
   note?: string
 }
 export interface ContractRow {
@@ -150,10 +176,18 @@ export interface Charts {
   forward?: Record<Scenario, { forward_revenue: number; forward_ebit: number }>
   contracts_monthly?: [string, number][]
   history?: { run_id: string; date: string; price: number | null; verdict: string | null; conservative?: number; base?: number; optimistic?: number }[]
+  issues?: IssueRow[]
+  news_enabled?: boolean
+}
+export interface IssueRow {
+  date: string; date_certain?: boolean; company: string; company_id: number | null; type: 'disclosure' | 'news'; title: string; url: string
+  rcept_no?: string; outlets?: string[]; articles?: number; sentiment?: 'positive' | 'negative' | 'neutral'
+  verification?: 'confirmed' | 'nearby' | 'news_only'; disclosure?: { rcept_no: string; report_nm: string; rcept_dt: string; url: string } | null
+  summary?: string; eid?: string; scope?: string; role?: 'target' | 'peer' | 'theme'
 }
 export interface Results { run: AnalysisRun; target: ValuationResult | null; companies: ValuationResult[]; report: Report | null; charts: Charts }
 export interface EvidenceItem {
-  eid: string; kind: 'fact' | 'estimate' | 'calc'; label: string; value: number | null; unit: string | null; display: string | null
+  eid: string; kind: 'fact' | 'estimate' | 'calc' | 'news'; label: string; value: number | null; unit: string | null; display: string | null
   period: string | null; as_of: string | null; company_id: number | null; company_name: string | null; method: string | null
   source: string | null; url: string | null; rcept_no: string | null; impact: string | null; detail: Record<string, unknown>
 }
@@ -167,7 +201,8 @@ export interface CompareResult {
 }
 
 export const analysisApi = {
-  start: (pid: string) => request<AnalysisRun>(`/api/projects/${pid}/analysis-runs`, { method: 'POST' }),
+  start: (pid: string, includeNews = true) =>
+    request<AnalysisRun>(`/api/projects/${pid}/analysis-runs`, { method: 'POST', body: JSON.stringify({ include_news: includeNews }) }),
   runs: (pid: string) => get<AnalysisRun[]>(`/api/projects/${pid}/analysis-runs`),
   run: (pid: string, rid: string) => get<AnalysisRun>(`/api/projects/${pid}/analysis-runs/${rid}`),
   results: (pid: string, rid: string) => get<Results>(`/api/projects/${pid}/analysis-runs/${rid}/results`),

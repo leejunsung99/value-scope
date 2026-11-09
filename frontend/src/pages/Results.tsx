@@ -1,9 +1,9 @@
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { Fragment, type ReactNode } from 'react'
 import { Link, useParams, useSearchParams } from 'react-router-dom'
 import {
-  analysisApi, krw, METHOD_LABEL, mult, pct, SCENARIO_LABEL, VERDICT_TONE, won,
-  type Attribution, type MethodResult, type Report, type Results, type ValuationResult,
+  analysisApi, downloadReportPdf, krw, METHOD_LABEL, mult, pct, SCENARIO_LABEL, VERDICT_TONE, won,
+  type Attribution, type IssueRow, type MethodResult, type Report, type Results, type ValuationResult,
 } from '../apiAnalysis'
 import {
   colorMap, ContractsChart, ExcessReturnChart, FairValueChart, ForwardChart, HistoryChart, MarginChart, MarketCapChart,
@@ -12,8 +12,9 @@ import {
 import { Badge, Card, CATEGORY_LABELS, Empty, fmtDate, fmtDateTime, Notice, Spinner, USE_TYPE_LABELS } from '../ui'
 import { EvidenceLink, EvidenceProvider } from './Evidence'
 import { useProject } from './ProjectLayout'
+import { IS_PRINT, printUrl } from '../print'
 
-function Section({ title, children, right }: { title: string; children: ReactNode; right?: ReactNode }) {
+export function Section({ title, children, right }: { title: string; children: ReactNode; right?: ReactNode }) {
   return (
     <Card className="p-5">
       <div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">{title}</h2>{right}</div>
@@ -65,7 +66,7 @@ export function ReportSection({ report, keys }: { report: Report | null; keys: s
   )
 }
 
-function MethodCard({ m }: { m?: MethodResult }) {
+export function MethodCard({ m }: { m?: MethodResult }) {
   if (!m) return null
   return (
     <div className="rounded-md border border-slate-200 p-3 text-xs dark:border-slate-800">
@@ -124,18 +125,75 @@ export function AttributionTable({ a }: { a?: Attribution }) {
       </div>
       <div className="text-[11px] text-slate-500">{a.note}</div>
       {!!a.abnormal_days?.length && (
-        <details className="mt-2">
+        <details className="mt-2" open={IS_PRINT}>
           <summary className="cursor-pointer text-xs font-semibold">개별 요인 이상 변동일 {a.abnormal_days.length}건</summary>
           <ul className="mt-1 space-y-1">
             {a.abnormal_days.map((d) => (
               <li key={d.date}>
                 <span className="tabular">{d.date}</span> 수익률 {pct(d.return)} (개별 {pct(d.idiosyncratic)}) — <span className={d.disclosures.length ? 'text-blue-700 dark:text-blue-300' : 'text-slate-500'}>{d.classification}</span>
                 {d.disclosures.map((x) => <a key={x.rcept_no} href={x.url} target="_blank" rel="noreferrer" className="ml-2 text-blue-600 hover:underline">{fmtDate(x.rcept_dt)} {x.report_nm}</a>)}
+                {d.news?.map((x) => <a key={x.eid} href={x.url} target="_blank" rel="noreferrer" className="ml-2 text-violet-700 hover:underline dark:text-violet-300">[보도] {x.date} {x.event}{x.outlets.length ? ` (${x.outlets.join(', ')})` : ''}</a>)}
               </li>
             ))}
           </ul>
         </details>
       )}
+    </div>
+  )
+}
+
+const SENT: Record<string, { label: string; tone: 'green' | 'red' | 'slate' }> = {
+  positive: { label: '긍정', tone: 'green' }, negative: { label: '부정', tone: 'red' }, neutral: { label: '중립', tone: 'slate' },
+}
+const VERIF: Record<string, string> = { confirmed: '공시로 확인', nearby: '인근 공시 있음', news_only: '기사로만 확인' }
+
+export function IssueTimeline({ issues, newsEnabled, compact }: { issues?: IssueRow[]; newsEnabled?: boolean; compact?: boolean }) {
+  const rows = issues ?? []
+  if (!rows.length) return <div className="text-xs text-slate-500">최근 주요 공시·보도가 없습니다.</div>
+  const groups: { key: string; label: string; rows: IssueRow[] }[] = [
+    { key: 'target', label: '고객사', rows: rows.filter((r) => r.role === 'target') },
+    { key: 'peer', label: '비교기업', rows: rows.filter((r) => r.role === 'peer') },
+    { key: 'theme', label: '전방산업·고객사', rows: rows.filter((r) => r.role === 'theme') },
+  ]
+  return (
+    <div className="space-y-4 text-xs">
+      {!newsEnabled && <div className="text-[11px] text-amber-700">이번 분석은 뉴스 검색 없이 공시만으로 작성되었습니다.</div>}
+      {groups.filter((g) => g.rows.length).map((g) => (
+        <div key={g.key} className={compact ? 'pr-keep' : ''}>
+          <div className="mb-1 text-[11px] font-semibold text-slate-600 dark:text-slate-300">{g.label} ({g.rows.length})</div>
+          <table className="w-full">
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              {g.rows.slice(0, compact ? 18 : 40).map((r, i) => (
+                <tr key={i} className="align-top">
+                  <td className="tabular w-24 whitespace-nowrap py-1 text-slate-500">{r.date}{r.type === 'news' && r.date_certain === false ? '*' : ''}</td>
+                  <td className="w-24 truncate pr-2 text-slate-600 dark:text-slate-400" title={r.company}>{r.company}</td>
+                  <td className="w-12">{r.type === 'news' ? <Badge tone="violet">보도</Badge> : <Badge tone="blue">공시</Badge>}</td>
+                  <td className="py-1">
+                    <a href={r.url} target="_blank" rel="noreferrer" className="hover:text-blue-600 hover:underline">{r.title}</a>
+                    {r.type === 'news' && (
+                      <span className="ml-1 text-[11px] text-slate-500">
+                        {r.outlets?.slice(0, 3).join(', ')}{(r.articles ?? 0) > 1 ? ` 외 · 기사 ${r.articles}건` : ''}
+                      </span>
+                    )}
+                    {r.type === 'news' && r.summary && !compact && <div className="text-[11px] text-slate-500">{r.summary}</div>}
+                  </td>
+                  <td className="w-40 whitespace-nowrap text-right">
+                    {r.type === 'news' && r.sentiment && <Badge tone={SENT[r.sentiment]?.tone ?? 'slate'}>{SENT[r.sentiment]?.label}</Badge>}{' '}
+                    {r.type === 'news' && r.verification && (
+                      r.disclosure ? <a href={r.disclosure.url} target="_blank" rel="noreferrer" className={`text-[11px] ${r.verification === 'confirmed' ? 'text-emerald-700' : 'text-slate-500'} hover:underline`} title={`${r.disclosure.rcept_dt} ${r.disclosure.report_nm}`}>{VERIF[r.verification]}</a>
+                        : <span className="text-[11px] text-amber-700">{VERIF[r.verification]}</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+      <div className="text-[11px] text-slate-500">
+        공시 = OpenDART(주요 공시만). 보도 = Claude 웹검색으로 찾은 기사(제목·언론사·링크, 링크 확인 후 사건별로 묶음) — 보조 근거이며 적정가 계산에는 쓰지 않습니다.
+        * 표시는 보도일 추정. '기사로만 확인'은 공시로 확인되지 않은 내용입니다.
+      </div>
     </div>
   )
 }
@@ -151,7 +209,7 @@ export function ContractsTable({ v }: { v: ValuationResult }) {
         <span>진행 중 {book.active_count}건 (금액 비공개 {book.undisclosed_active}건){book.lapsed_count ? ` · 기간 경과·완료 미공시 ${book.lapsed_count}건` : ''}</span>
         {bl?.amount != null && <span>수주잔고 <EvidenceLink ids={[bl.eid]}>{krw(bl.amount)}</EvidenceLink> — {bl.source_label}</span>}
       </div>
-      <div className="max-h-72 overflow-y-auto">
+      <div className={IS_PRINT ? '' : 'max-h-72 overflow-y-auto'}>
         <table className="w-full">
           <thead className="sticky top-0 bg-white text-left text-[11px] text-slate-500 dark:bg-slate-900"><tr><th className="py-1">계약일</th><th>계약상대방</th><th>내용</th><th className="text-right">계약금액</th><th>기간</th><th>상태</th><th className="text-right">잔여 추정</th><th>공시</th></tr></thead>
           <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
@@ -262,7 +320,7 @@ export function Step3Results() {
   return <EvidenceProvider projectId={project.id} runId={runId}><Dashboard r={q.data} projectId={project.id} /></EvidenceProvider>
 }
 
-function Dashboard({ r, projectId }: { r: Results; projectId: string }) {
+export function Dashboard({ r, projectId }: { r: Results; projectId: string }) {
   const dark = useDark()
   const t = r.target
   const s = r.run.summary
@@ -289,6 +347,7 @@ function Dashboard({ r, projectId }: { r: Results; projectId: string }) {
             </div>
           </div>
           <div className="max-w-xl text-sm text-slate-600 dark:text-slate-300">{r.report?.content.summary}</div>
+          {!IS_PRINT && <PdfButtons projectId={projectId} runId={r.run.id} />}
         </div>
         <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
           <Kpi label="현재 주가" value={won(s.price)} sub={`기준일 ${s.price_date ?? '—'}`} eids={[eids.price]} />
@@ -358,6 +417,11 @@ function Dashboard({ r, projectId }: { r: Results; projectId: string }) {
         </Section>
       </div>
 
+      <Section title="최근 이슈 타임라인 (공시·뉴스)">
+        <IssueTimeline issues={r.charts.issues} newsEnabled={r.charts.news_enabled} />
+        <ReportSection report={r.report} keys={['issues']} />
+      </Section>
+
       {/* ---------------- 동종업계 */}
       <div className="grid gap-4 xl:grid-cols-2">
         <Section title="기업별 시가총액 비교"><MarketCapChart charts={r.charts} /></Section>
@@ -398,7 +462,7 @@ function Dashboard({ r, projectId }: { r: Results; projectId: string }) {
 
       {/* ---------------- 보고서 */}
       <Section title="근거 기반 AI 분석 보고서" right={r.report && <ReviewBadge report={r.report} />}>
-        <ReportSection report={r.report} keys={['overall', 'positive', 'negative', 'peers', 'price_move', 'fair_value', 'conclusion', 'triggers']} />
+        <ReportSection report={r.report} keys={['overall', 'positive', 'negative', 'peers', 'price_move', 'issues', 'fair_value', 'conclusion', 'triggers']} />
       </Section>
 
       {r.charts.history && r.charts.history.length > 0 && (
@@ -414,6 +478,23 @@ function Dashboard({ r, projectId }: { r: Results; projectId: string }) {
           <dt className="text-slate-500">재무 기준 분기</dt><dd>{Object.entries((r.run.data_versions?.financials ?? {}) as Record<string, string | null>).map(([n, q]) => `${n} ${q ?? '없음'}`).join(' · ')}</dd>
         </dl>
       </Section>
+    </div>
+  )
+}
+
+function PdfButtons({ projectId, runId }: { projectId: string; runId: string }) {
+  const pdf = useMutation({ mutationFn: () => downloadReportPdf(projectId, runId) })
+  return (
+    <div className="flex flex-col items-end gap-1 text-xs">
+      <div className="flex gap-2">
+        <button onClick={() => pdf.mutate()} disabled={pdf.isPending}
+          className="inline-flex items-center gap-1.5 rounded-md bg-slate-900 px-3 py-1.5 font-medium text-white hover:bg-slate-700 disabled:opacity-60 dark:bg-slate-100 dark:text-slate-900">
+          {pdf.isPending ? <><Spinner /> PDF 만드는 중…</> : 'PDF 다운로드'}
+        </button>
+        <a href={printUrl(projectId, runId, true)} target="_blank" rel="noreferrer"
+          className="rounded-md border border-slate-300 px-3 py-1.5 hover:bg-slate-50 dark:border-slate-700 dark:hover:bg-slate-800">브라우저 인쇄로 저장</a>
+      </div>
+      {pdf.isError && <div className="max-w-sm text-right text-red-600">{(pdf.error as Error).message}</div>}
     </div>
   )
 }
@@ -442,7 +523,7 @@ function PeerTable({ r, projectId }: { r: Results; projectId: string }) {
           {rows.map((c) => (
             <tr key={c.company_id} className={c.is_target ? 'bg-blue-50/60 dark:bg-blue-950/30' : ''}>
               <td className="py-1.5 font-medium">
-                <Link to={`/projects/${projectId}/results/company/${c.company_id}?run=${r.run.id}`} className="hover:text-blue-600 hover:underline">{c.name}</Link>
+                {IS_PRINT ? c.name : <Link to={`/projects/${projectId}/results/company/${c.company_id}?run=${r.run.id}`} className="hover:text-blue-600 hover:underline">{c.name}</Link>}
                 {c.is_target && <Badge tone="blue">고객사</Badge>}
               </td>
               <td className="text-slate-500">{c.is_target ? '—' : `${c.category}. ${CATEGORY_LABELS[c.category as 'A']?.slice(0, 6) ?? ''} · ${USE_TYPE_LABELS[c.use_type as 'valuation'] ?? ''}`}</td>

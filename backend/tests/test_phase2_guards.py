@@ -123,3 +123,59 @@ def test_method_disagreement_means_hold_judgement():
                       earnings_unstable=False, undisclosed=0, ev=ev, target_name="T")
     assert out["method_dispersion"] > 3 and out["verdict"] == "판단 유보" and "불일치" in out["verdict_reason"]
     assert out["envelope"] == {"low": 5500, "high": 110600}
+
+
+def _basis_case(ttm_ebit):
+    t = eng.CompanyMetrics(1, "T", values={"ebit_norm": 100.0, "ni_core_norm": 80.0, "operating_income_ttm": ttm_ebit,
+                                           "core_ni_ttm": ttm_ebit * 0.8, "norm_quarters": 20, "net_debt": 0.0,
+                                           "minority_interest": 0.0, "shares_out": 10.0})
+    peers = [eng.CompanyMetrics(i, f"P{i}", values={"ev_ebit_norm": x * 1.2, "pe_norm": x * 1.5, "ev_ebit": x, "per_adj": x * 1.3})
+             for i, x in enumerate([8.0, 10.0, 12.0], start=2)]
+    return t, peers
+
+
+def test_peer_basis_switches_to_ttm_when_business_scaled_up():
+    ev = eng.Evidence()
+    t, peers = _basis_case(300.0)  # TTM 3x the 5y average
+    r = eng.method_peer(t, peers, ev)
+    assert r["basis"] == "ttm" and r["scale_ratio"] == pytest.approx(3.0)
+    assert [u["multiple"] for u in r["inputs"]] == ["EV/EBIT(TTM)", "조정 P/E(TTM)"]
+    assert r["scenarios"]["base"]["components"]["EV/EBIT(TTM)"]["per_share"] == pytest.approx(10.0 * 300 / 10)
+    assert any("TTM 전환" in n for n in r["notes"])
+    # normalized multiples still exposed for the forward method
+    assert [u["key"] for u in r["inputs_norm"]] == ["ev_ebit_norm", "pe_norm"]
+
+
+def test_peer_basis_stays_normalized_for_stable_earnings():
+    ev = eng.Evidence()
+    t, peers = _basis_case(150.0)
+    r = eng.method_peer(t, peers, ev)
+    assert r["basis"] == "normalized"
+    assert [u["key"] for u in r["inputs"]] == ["ev_ebit_norm", "pe_norm"]
+
+
+def test_unverified_ai_summary_is_replaced_by_engine_summary():
+    from app.services.ai import AIProvider, AIResult
+    from app.services.report import SECTIONS, generate_report
+
+    ev = eng.Evidence()
+    e1 = ev.add("fact", "T 종가", 63000, "KRW/주", "63,000원")
+
+    class FakeAI(AIProvider):
+        name = "fake"
+
+        def complete_json(self, system, prompt, schema):
+            if "Review Agent" in system:
+                return AIResult(data={"issues": [], "counter_evidence_reviewed": True, "overall_comment": ""}, provider="fake", model="f")
+            secs = [{"key": k, "paragraphs": [{"text": "현재가 63,000원입니다.", "evidence_ids": [e1], "claim_type": "fact"}]} for k, _ in SECTIONS]
+            return AIResult(data={"sections": secs, "final_verdict": "적정",
+                                  "summary": "전환사채 손실 388억원이 부담이라 매수는 신중해야 합니다."}, provider="fake", model="f")
+
+    payload = {"name": "T", "verdict": "적정", "price": 63000.0, "confidence": 70.0,
+               "fair_value": {"conservative": 51671.0, "base": 61071.0, "optimistic": 84775.0}}
+    rep = generate_report(FakeAI(), payload, ev.items)
+    c = rep["content"]
+    assert c["summary_ai_rejected"].startswith("전환사채")
+    assert "61,071원" in c["summary"] and "388억원" not in c["summary"] and "매수" not in c["summary"]
+    assert any("요약" in e for e in rep["review"]["errors"])
+    assert {i["type"] for i in c["summary_issues"]} == {"unsupported", "number_mismatch"}

@@ -19,9 +19,10 @@ SECTIONS = [
     ("negative", "③ 부정적 평가 근거"),
     ("peers", "④ 동종업계 대비 평가"),
     ("price_move", "⑤ 주가 움직임 분석"),
-    ("fair_value", "⑥ 적정주가 산출 근거"),
-    ("conclusion", "⑦ 최종 결론"),
-    ("triggers", "⑧ 평가 변화 조건"),
+    ("issues", "⑥ 최근 이슈와 업황 (공시·뉴스)"),
+    ("fair_value", "⑦ 적정주가 산출 근거"),
+    ("conclusion", "⑧ 최종 결론"),
+    ("triggers", "⑨ 평가 변화 조건"),
 ]
 VERDICTS = ["고평가", "적정", "저평가", "판단 유보"]
 
@@ -35,7 +36,12 @@ WRITER_SYSTEM = """당신은 한국 상장사 기업가치 분석 보고서를 �
 - 부정적 근거와 반대 해석도 반드시 다루십시오. 주가 하락을 악재로 단정하지 말고, 공시와 주가의 시간적 근접을 인과로 단정하지 마십시오.
 - 매수·매도·보유 등 투자 권유 표현은 쓰지 마십시오.
 - 근거 목록에 없는 업황·기술·고객 정보(예: 특정 세대 투자 사이클)를 단정하지 마십시오. 필요하면 '확인되지 않음'이라고 쓰십시오.
-- ⑧ 평가 변화 조건에는 가정 조건의 기준 수치를 쓸 수 있으며, 이는 사실이 아닌 조건임을 문장에 밝히십시오.
+- ⑨ 평가 변화 조건에는 가정 조건의 기준 수치를 쓸 수 있으며, 이는 사실이 아닌 조건임을 문장에 밝히십시오.
+- kind=news 근거는 언론 보도입니다. impact에 '공시로 확인'이 없으면 "~로 보도되었다"처럼 보도임을 밝히고 사실로 단정하지 마십시오.
+  공시로 확인되지 않은 보도만 근거로 한 문단의 claim_type은 judgment로 하십시오. 보도일이 '(추정)'인 기사는 날짜를 단정하지 마십시오.
+- ⑥ 최근 이슈와 업황: 고객사 자체 이슈, 비교기업 동향, 전방산업·고객사 투자 동향을 뉴스·공시 근거로 정리하고,
+  긍정·부정 이슈를 모두 다루십시오. 뉴스 근거가 없으면 '확인된 보도 없음'이라고 쓰십시오.
+- 주가 급변일 설명에 기사 근거가 있으면 ⑤에서 함께 언급하되, 시간적 근접을 인과로 단정하지 마십시오.
 - 한국어로 작성합니다."""
 
 REVIEW_SYSTEM = """당신은 금융 분석 보고서 검증 담당(Review Agent)입니다. 제공된 근거 목록과 보고서 문단을 대조해 문제를 찾으십시오.
@@ -109,8 +115,14 @@ def known_values(items: list[dict]) -> list[float]:
         if e.get("value") is not None:
             vals.append(e["value"])
         _collect_numbers(e.get("detail") or {}, vals)
-        for m in NUM_RE.finditer(e.get("display") or ""):
-            vals.append(_to_base(m.group(1), m.group(2)))
+        texts = [e.get("display") or ""]
+        if e.get("kind") == "news":
+            # 언론 보도 근거: 기사 요약에 나온 수치는 '보도된 수치'로 인용 가능 (보도임을 밝히는 규칙은 Writer 지침)
+            texts.append(e.get("method") or "")
+            texts += [a.get("summary") or "" for a in (e.get("detail") or {}).get("articles", [])]
+        for t in texts:
+            for m in NUM_RE.finditer(t):
+                vals.append(_to_base(m.group(1), m.group(2)))
     return vals + [-v for v in vals]  # 순차입금 ↔ 순현금처럼 부호만 반대인 표현 허용
 
 
@@ -151,8 +163,9 @@ def generate_report(ai: AIProvider, payload: dict, evidence: list[dict]) -> dict
     try:
         prompt = ("## 엔진 결과 요약\n" + json.dumps(payload, ensure_ascii=False, default=str) +
                   "\n\n## 근거 목록(evidence)\n" + json.dumps(compact_evidence(evidence), ensure_ascii=False) +
-                  "\n\n## 작성 지시\n아래 8개 섹션을 모두 작성하십시오: " + ", ".join(f"{k}={t}" for k, t in SECTIONS) +
-                  "\n각 섹션 1~4개 문단. ⑧ 평가 변화 조건에는 평가를 상향·하향해야 할 구체적 조건(수주·실적·업황)을 쓰십시오.")
+                  f"\n\n## 작성 지시\n아래 {len(SECTIONS)}개 섹션을 모두 작성하십시오: " + ", ".join(f"{k}={t}" for k, t in SECTIONS) +
+                  "\n각 섹션 1~4개 문단. ⑨ 평가 변화 조건에는 평가를 상향·하향해야 할 구체적 조건(수주·실적·업황)을 쓰십시오."
+                  "\nsummary(요약)도 같은 규칙을 따릅니다: 근거에 있는 수치·사실만 쓰고, 문단에서 유보한 내용을 요약에서 단정하지 마십시오.")
         r = ai.complete_json(WRITER_SYSTEM, prompt, writer_schema())
         content, ai_model = r.data, r.model
     except (AIUnavailable, AIError) as e:
@@ -194,6 +207,16 @@ def generate_report(ai: AIProvider, payload: dict, evidence: list[dict]) -> dict
         if k not in have:
             sections.append({"key": k, "title": t, "paragraphs": [], "missing": True})
             errors.append(f"섹션 누락: {t}")
+    summary_text = content.get("summary") or ""
+    summary_issues = []
+    if status == "generated":
+        if INVEST_ADVICE.search(summary_text):
+            summary_issues.append({"type": "unsupported", "severity": "high", "by": "rule",
+                                   "message": f"투자 권유 표현 금지: '{INVEST_ADVICE.search(summary_text).group(0)}'"})
+        bad = check_numbers(summary_text, values)
+        if bad:
+            summary_issues.append({"type": "number_mismatch", "severity": "high", "by": "rule",
+                                   "message": f"근거와 일치하지 않는 수치: {', '.join(bad[:5])}"})
     verdict_ok = content.get("final_verdict") == payload.get("verdict")
     if not verdict_ok:
         for s in sections:
@@ -210,12 +233,17 @@ def generate_report(ai: AIProvider, payload: dict, evidence: list[dict]) -> dict
                                   "## 근거 목록\n" + json.dumps(compact_evidence(evidence), ensure_ascii=False) +
                                   "\n\n## 엔진 판단\n" + json.dumps({"verdict": payload.get("verdict"), "scenarios": payload.get("fair_value")}, ensure_ascii=False, default=str) +
                                   "\n\n## 보고서 문단 (ref: 텍스트 [근거])\n" +
-                                  "\n".join(f"{p['ref']}: {p['text']} [{', '.join(p['evidence_ids'])}]" for s in sections for p in s["paragraphs"]),
+                                  "\n".join(f"{p['ref']}: {p['text']} [{', '.join(p['evidence_ids'])}]" for s in sections for p in s["paragraphs"])
+                                  + f"\nsummary.1: {summary_text} [요약 — 위 문단과 근거 목록 기준으로 점검]",
                                   review_schema())
             review_meta = {"by_ai": True, "model": rv.model, "counter_evidence_reviewed": rv.data.get("counter_evidence_reviewed"),
                            "overall_comment": rv.data.get("overall_comment")}
             by_ref = {p["ref"]: p for s in sections for p in s["paragraphs"]}
             for iss in rv.data.get("issues", []):
+                if iss.get("paragraph_ref") == "summary.1":
+                    sev = "high" if iss.get("type") in FORCE_HIGH else iss.get("severity", "low")
+                    summary_issues.append({**iss, "severity": sev, "by": "review_agent"})
+                    continue
                 p = by_ref.get(iss.get("paragraph_ref"))
                 if p:
                     sev = iss.get("severity", "low")
@@ -230,14 +258,36 @@ def generate_report(ai: AIProvider, payload: dict, evidence: list[dict]) -> dict
     for s in sections:
         for p in s["paragraphs"]:
             p["status"] = "unverified" if any(i["severity"] == "high" for i in p["issues"]) else "verified"
+    summary_ai = None
+    if any(i["severity"] == "high" for i in summary_issues):
+        summary_ai = summary_text
+        summary_text = engine_summary(payload)
+        errors.append("AI 요약이 검증을 통과하지 못해 엔진 결과 기반 요약으로 대체: "
+                      + " / ".join(i["message"][:120] for i in summary_issues if i["severity"] == "high"))
     n_total = sum(len(s["paragraphs"]) for s in sections)
     n_bad = sum(1 for s in sections for p in s["paragraphs"] if p["status"] == "unverified")
     return {
         "status": status, "ai_model": ai_model,
-        "content": {"sections": sections, "summary": content.get("summary"), "final_verdict": payload.get("verdict"),
-                    "writer_verdict": content.get("final_verdict")},
+        "content": {"sections": sections, "summary": summary_text, "final_verdict": payload.get("verdict"),
+                    "writer_verdict": content.get("final_verdict"), "summary_ai_rejected": summary_ai, "summary_issues": summary_issues},
         "review": {**review_meta, "paragraphs": n_total, "unverified": n_bad, "verdict_consistent": verdict_ok, "errors": errors},
     }
+
+
+def engine_summary(payload: dict) -> str:
+    """검증된 엔진 값만으로 만든 요약 (AI 요약이 검증에 실패했을 때 사용)."""
+    fv = payload.get("fair_value") or {}
+
+    def w(v):
+        return f"{v:,.0f}원" if isinstance(v, (int, float)) else "산출 불가"
+
+    txt = f"{payload.get('name')}의 현재가는 {w(payload.get('price'))}입니다. "
+    if fv.get("base") is not None:
+        txt += f"평가 방법을 가중 결합한 적정주가 기준값은 {w(fv.get('base'))}(범위 {w(fv.get('conservative'))}~{w(fv.get('optimistic'))})이며, "
+    txt += f"엔진 판단은 '{payload.get('verdict')}'(분석 신뢰도 {payload.get('confidence', 0):.0f}점)입니다."
+    if payload.get("verdict_reason"):
+        txt += f" 판단 유보 사유: {payload['verdict_reason']}."
+    return txt + " 세부 근거는 아래 각 섹션을 참고하십시오."
 
 
 def rule_based_report(payload: dict, evidence: list[dict]) -> dict:
@@ -260,6 +310,11 @@ def rule_based_report(payload: dict, evidence: list[dict]) -> dict:
         "peers": [{"text": f"동종업계 상대평가 기준 주당가치는 {d(t.get('peer_eid'))}입니다.", "evidence_ids": [x for x in (t.get('peer_eid'),) if x], "claim_type": "estimate"}],
         "price_move": [{"text": "주가 변동은 시장·산업·개별 요인으로 회귀 분해했습니다. 세부 수치는 주가 변동 분석 표를 참고하십시오.",
                         "evidence_ids": [x for x in (t.get('attr_eid'),) if x], "claim_type": "estimate"}],
+        "issues": ([{"text": "최근 보도된 주요 이슈: " + "; ".join(by[e]["display"] for e in t.get("news_eids", [])[:5] if e in by)
+                               + ". 공시로 확인되지 않은 보도는 사실로 단정하지 않습니다.",
+                     "evidence_ids": [e for e in t.get("news_eids", [])[:5] if e in by], "claim_type": "judgment"}]
+                   if t.get("news_eids") else [{"text": "뉴스 검색 결과가 없어 공시 기준으로만 분석했습니다.",
+                                                 "evidence_ids": [x for x in (fv,) if x], "claim_type": "judgment"}]),
         "fair_value": [{"text": f"적정주가는 가용 평가방법을 가중 결합해 {d(fv)}로 산출했습니다.", "evidence_ids": [x for x in (fv,) if x], "claim_type": "estimate"}],
         "conclusion": [{"text": f"최종 판단은 '{t['verdict']}'이며 분석 신뢰도는 {d(t.get('confidence_eid'))}입니다.",
                         "evidence_ids": [x for x in (t.get('confidence_eid'), fv) if x], "claim_type": "judgment"}],

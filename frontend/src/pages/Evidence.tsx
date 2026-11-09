@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
+import { IS_PRINT } from '../print'
 import { createContext, useContext, useState, type ReactNode } from 'react'
 import { analysisApi, type EvidenceItem } from '../apiAnalysis'
 import { Badge, Modal, Spinner, fmtDate } from '../ui'
@@ -7,6 +8,7 @@ const KIND: Record<string, { label: string; tone: 'green' | 'violet' | 'blue' }>
   fact: { label: '공시·시세 확인 사실', tone: 'green' },
   calc: { label: '공식 데이터 기반 계산', tone: 'blue' },
   estimate: { label: '추정(명시적 가정)', tone: 'violet' },
+  news: { label: '언론 보도(보조 근거)', tone: 'violet' },
 }
 
 type Ctx = { open: (ids: string[], title?: string) => void }
@@ -26,6 +28,7 @@ export function EvidenceProvider({ projectId, runId, children }: { projectId: st
 export function EvidenceLink({ ids, children, title }: { ids: (string | null | undefined)[]; children?: ReactNode; title?: string }) {
   const { open } = useEvidence()
   const valid = ids.filter(Boolean) as string[]
+  if (IS_PRINT) return <>{children ?? valid.join(', ')}</>
   if (!valid.length) return <>{children}</>
   return (
     <button onClick={() => open(valid, title)} className="inline-flex items-center gap-0.5 text-blue-600 hover:underline dark:text-blue-400" title="분석 근거 상세보기">

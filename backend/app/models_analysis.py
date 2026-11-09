@@ -167,6 +167,46 @@ class ContractOrder(Base):
     fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
+class NewsSearch(Base):
+    """뉴스 검색 1회(검색 단위 = 기업 또는 주제). 같은 날 재검색 방지·이어서 검색(증분)·일일 상한에 사용."""
+
+    __tablename__ = "news_searches"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    query_key: Mapped[str] = mapped_column(String(200), index=True)   # company:<id> | theme:<project_id>:<name>
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"), nullable=True)
+    query: Mapped[str] = mapped_column(Text)
+    since: Mapped[str] = mapped_column(String(10))
+    until: Mapped[str] = mapped_column(String(10))
+    status: Mapped[str] = mapped_column(String(20))                   # succeeded | failed
+    item_count: Mapped[int] = mapped_column(Integer, default=0)
+    model: Mapped[str | None] = mapped_column(String(60))
+    error: Mapped[str | None] = mapped_column(Text)
+    searched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class NewsItem(Base):
+    """검색으로 찾은 기사 메타데이터(제목·언론사·날짜·링크·짧은 요약). 기사 본문은 저장하지 않는다."""
+
+    __tablename__ = "news_items"
+    __table_args__ = (UniqueConstraint("query_key", "url", name="uq_news_query_url"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    query_key: Mapped[str] = mapped_column(String(200), index=True)
+    company_id: Mapped[int | None] = mapped_column(ForeignKey("companies.id"), nullable=True)
+    pub_date: Mapped[str | None] = mapped_column(String(10), index=True)
+    date_certain: Mapped[bool] = mapped_column(Boolean, default=False)
+    outlet: Mapped[str | None] = mapped_column(String(100))
+    title: Mapped[str] = mapped_column(String(400))
+    url: Mapped[str] = mapped_column(String(600))
+    summary: Mapped[str | None] = mapped_column(Text)
+    event: Mapped[str | None] = mapped_column(String(200))
+    sentiment: Mapped[str | None] = mapped_column(String(10))        # positive | negative | neutral
+    about: Mapped[str | None] = mapped_column(String(200))           # 기사의 주 대상 기업·주제
+    link_status: Mapped[str] = mapped_column(String(20), default="unchecked")  # ok | unverified | unchecked
+    fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class AnalysisRun(Base):
     __tablename__ = "analysis_runs"
 
