@@ -78,7 +78,7 @@ def review_schema() -> dict:
 
 def compact_evidence(items: list[dict]) -> list[dict]:
     return [{"id": e["eid"], "kind": e["kind"], "label": e["label"], "display": e["display"], "period": e["period"],
-             "as_of": e["as_of"], "method": (e["method"] or "")[:300], "source": e["source"], "impact": e["impact"]}
+             "as_of": e["as_of"], "method": (e["method"] or "")[:1200], "source": e["source"], "impact": e["impact"]}
             for e in items]
 
 
@@ -99,6 +99,7 @@ def _collect_numbers(obj, out: list[float]) -> None:
             _collect_numbers(v, out)
 
 
+FORCE_HIGH = {"number_mismatch", "period_mismatch", "unsupported", "double_count", "calc_error", "conclusion_mismatch"}
 INVEST_ADVICE = re.compile(r"매수|매도|비중\s*확대|비중\s*축소|보유\s*유지|목표주가|추천|투자\s*의견")
 
 
@@ -217,7 +218,10 @@ def generate_report(ai: AIProvider, payload: dict, evidence: list[dict]) -> dict
             for iss in rv.data.get("issues", []):
                 p = by_ref.get(iss.get("paragraph_ref"))
                 if p:
-                    p["issues"].append({**iss, "by": "review_agent"})
+                    sev = iss.get("severity", "low")
+                    if iss.get("type") in FORCE_HIGH and sev != "high":
+                        sev = "high"  # 근거 없는 단정·계산·수치·기간 오류는 경미 판정이어도 게시하지 않음
+                    p["issues"].append({**iss, "severity": sev, "by": "review_agent", "original_severity": iss.get("severity")})
             if not rv.data.get("counter_evidence_reviewed"):
                 errors.append("Review Agent: 반대 근거 검토가 충분하지 않다고 판단")
         except (AIUnavailable, AIError) as e:

@@ -72,7 +72,7 @@ export interface MethodResult {
   notes: string[]
   scenarios: Record<string, { per_share: number | null; forward_revenue?: number; forward_ebit?: number; multiple?: number }>
   inputs?: MethodInput[]
-  assumptions?: { backlog?: number; backlog_source?: string; backlog_as_of?: string; forward_revenue?: Record<Scenario, number>; recognition_rule?: string; op_margin?: Record<Scenario, number>; op_margin_basis?: string; multiple_source?: string; multiple?: number; multiples?: Record<Scenario, number>; undisclosed_contracts?: number; undisclosed_pool?: number }
+  assumptions?: { backlog?: number; backlog_source?: string; backlog_as_of?: string; forward_revenue?: Record<Scenario, number>; recognition_rule?: string; op_margin?: Record<Scenario, number>; op_margin_basis?: string; multiple_source?: string; multiple?: number; multiples?: Record<Scenario, number>; op_last8?: number; normalization?: string; undisclosed_contracts?: number; undisclosed_pool?: number }
   eid?: string
   peer_count?: number
   fallback?: boolean
@@ -93,12 +93,15 @@ export interface ContractRow {
   key: string; description: string | null; counterparty: string | null; contract_date: string | null; start_date: string | null; end_date: string | null
   amount: number | null; amount_disclosed: boolean; withheld_until: string | null; status: string; remaining_estimate: number | null
   filings: number; latest_rcept_no: string; latest_url: string; first_filed: string; sales_ratio: number | null
+  end_undetermined?: boolean; end_history?: string[]
 }
 export interface Schedule {
   available: boolean; reason?: string; as_of?: string; official_backlog?: number; disclosed_remaining?: number; undisclosed_pool?: number
   undisclosed_contracts?: number; horizon?: string[]; rule?: string; notes?: string[]; lumpiness?: number | null; eid?: string
   scenarios?: Record<Scenario, { revenue: number; recognized_before_today: number }>
-  pieces?: { label: string; amount: number; end: string | null; disclosed: boolean; rcept_no: string | null; contract_date: string | null; end_assumed?: boolean }[]
+  pieces?: { label: string; amount: number; end: string | null; disclosed: boolean; rcept_no: string | null; contract_date: string | null; end_assumed?: boolean; weight?: number }[]
+  undetermined?: { label: string; amount: number | null; contract_date: string | null; end_history: string[]; delays: number }[]
+  undetermined_amount?: number
 }
 export interface QuarterRow { period: string; revenue: number | null; operating_income: number | null; net_income: number | null; op_margin: number | null; rcept_no: string }
 export interface ValuationResult {
@@ -119,7 +122,7 @@ export interface ValuationResult {
   data_status?: {
     backlog?: { amount: number | null; source_label: string; as_of: string; undisclosed_active: number; eid?: string; official?: { quote: string; check: string; url: string; title: string } } | null
     schedule?: Schedule | null
-    contracts?: { contracts: ContractRow[]; filings_total: number; contracts_total: number; duplicates_merged: number; active_count: number; undisclosed_active: number; backlog_estimate: number }
+    contracts?: { contracts: ContractRow[]; filings_total: number; contracts_total: number; duplicates_merged: number; active_count: number; lapsed_count?: number; undisclosed_active: number; backlog_estimate: number }
   }
   scenarios?: { method: string; scenario: Scenario; multiple_name: string | null; multiple: number | null; per_share: number | null }[]
 }

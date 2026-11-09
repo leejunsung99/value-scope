@@ -76,13 +76,46 @@ def test_forward_schedule_allocates_undisclosed_and_shifts():
     rem_a = 365.0 * (date(2026, 12, 31) - date(2026, 6, 30)).days / 364
     assert s["disclosed_remaining"] == pytest.approx(rem_a)
     assert s["undisclosed_pool"] == pytest.approx(1000 - rem_a)
-    share = (1000 - rem_a) / 2
+    d_b = (date(2027, 3, 31) - date(2026, 5, 1)).days
+    d_c = (date(2028, 6, 30) - date(2026, 2, 1)).days
+    share = (1000 - rem_a) * d_b / (d_b + d_c)  # fix 3: allocation proportional to contract duration
     assert s["scenarios"]["base"]["revenue"] == pytest.approx(rem_a + share)  # A (Dec 26) + B (Mar 27); C is 2028
     # +6m delay: A -> 2027-07, B -> 2027-09 still inside the horizon (to 2027-11-09)
     assert s["scenarios"]["conservative"]["revenue"] == pytest.approx(rem_a + share)
     late = forward_schedule(book, official, date(2026, 6, 30))  # horizon to 2027-06-30: B +6m -> 2027-09 falls out
     assert late["scenarios"]["conservative"]["revenue"] < late["scenarios"]["base"]["revenue"]  # delays push deliveries out
     assert s["scenarios"]["optimistic"]["revenue"] >= s["scenarios"]["base"]["revenue"]
+
+
+def test_undetermined_delivery_excluded_and_lapsed_status(db):
+    from app.models import Company
+    from app.models_analysis import ContractOrder
+    from app.services.collect_disclosures import contract_book
+
+    c = Company(company_key="dart:77777777", corp_code="77777777", name="계약", market="KOSDAQ", is_listed=True, is_verified=True)
+    db.add(c)
+    db.commit()
+    base = dict(company_id=c.id, report_nm="단일판매ㆍ공급계약체결", source="TEST", url="u", is_correction=False,
+                is_cancellation=False, completed=False, counterparty="X", description="d")
+    # delayed twice then end date set to '-' (undetermined)
+    db.add(ContractOrder(rcept_no="1", filed_date="20240228", contract_key="k1", amount=300.0, amount_disclosed=True,
+                         start_date="2024-02-27", end_date="2025-01-26", contract_date="2024-02-27", **base))
+    db.add(ContractOrder(rcept_no="2", filed_date="20250219", contract_key="k1", amount=300.0, amount_disclosed=True,
+                         start_date="2024-02-27", end_date="2025-05-25", contract_date="2024-02-27", **base))
+    db.add(ContractOrder(rcept_no="3", filed_date="20250923", contract_key="k1", amount=300.0, amount_disclosed=True,
+                         start_date="2024-02-27", end_date=None, contract_date="2024-02-27", **base))
+    # undisclosed amount, withholding expired, delivery passed, never completed -> lapsed
+    db.add(ContractOrder(rcept_no="4", filed_date="20240416", contract_key="k2", amount=None, amount_disclosed=False,
+                         start_date="2024-04-16", end_date="2025-03-28", withheld_until="2025-03-28", contract_date="2024-04-16", **base))
+    db.commit()
+    book = contract_book(db, c.id, date(2026, 6, 30))
+    by = {x["key"]: x for x in book["contracts"]}
+    assert by["k1"]["end_undetermined"] and by["k1"]["status"] == "active"
+    assert by["k2"]["status"] == "lapsed" and book["undisclosed_active"] == 0 and book["lapsed_count"] == 1
+    s = forward_schedule(book, {"amount": 1000.0, "as_of": "2026-06", "last_delivery": "2027-07-31"}, date(2026, 11, 9))
+    assert s["undetermined_amount"] == 300.0
+    assert all(p["label"] != "X" or not p["disclosed"] for p in s["pieces"])  # k1 not in the delivery schedule
+    assert any("납기 미정" in n for n in s["notes"])
 
 
 def test_forward_schedule_requires_official_backlog():

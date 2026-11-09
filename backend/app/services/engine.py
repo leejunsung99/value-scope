@@ -31,9 +31,14 @@ MAX_MULTIPLE_DISPERSION = 3.0
 MAX_RANGE_RATIO = 3.0
 # 방법별 기준값의 최대/최소 비율이 이 값을 넘으면 방법 간 결론 불일치 → 판단 유보.
 MAX_METHOD_DISAGREEMENT = 3.0
+EARNINGS_KEYS = {"ev_ebit_norm", "pe_norm", "ev_ebit", "per"}
 
 
-def dispersion(qs: dict) -> float | None:
+def dispersion(qs: dict, vals: list[float] | None = None) -> float | None:
+    """분포 분산도. 표본 6개 미만이면 4분위가 보간으로 좁아지므로 최대/최소로 판정한다."""
+    if vals is not None and len(vals) < 6:
+        lo, hi = min(vals), max(vals)
+        return hi / lo if lo > 0 else None
     return qs["optimistic"] / qs["conservative"] if qs["conservative"] > 0 else None
 
 
@@ -303,9 +308,9 @@ def method_peer(target: CompanyMetrics, peers: list[CompanyMetrics], ev: Evidenc
                 res["notes"].append(f"{label}: 유효 비교기업 {len(pvals)}개(2개 미만) → 적용 불가")
                 continue
             qs = _quantiles([x[1] for x in pvals])
-            dsp = dispersion(qs)
+            dsp = dispersion(qs, [x[1] for x in pvals])
             if dsp is None or dsp > MAX_MULTIPLE_DISPERSION:
-                res["notes"].append(f"{label}: 비교기업 간 분산 과대(상위/하위 {dsp or 0:.1f}배 > {MAX_MULTIPLE_DISPERSION:.0f}배: "
+                res["notes"].append(f"{label}: 비교기업 간 분산 과대({'최대/최소' if len(pvals) < 6 else '상위/하위'} {dsp or 0:.1f}배 > {MAX_MULTIPLE_DISPERSION:.0f}배: "
                                     + ", ".join(f"{n} {x:.1f}" for n, x, _ in pvals) + ") → 비교 근거에서 제외")
                 res.setdefault("excluded", []).append({"multiple": label, "quantiles": qs, "dispersion": dsp,
                                                        "peers": [{"name": n, "value": x} for n, x, _ in pvals]})
@@ -323,13 +328,14 @@ def method_peer(target: CompanyMetrics, peers: list[CompanyMetrics], ev: Evidenc
                          "quantiles": qs, "results": per, "base_eid": target.eids.get(base_key)})
         if used:
             if is_fallback:
-                res["notes"].append("이익 배수 적용이 불가해 매출·자산 배수로 대체 — 신뢰도 하향")
+                res["notes"].append("이익 배수 적용이 불가해 대체 배수(" + ", ".join(u["multiple"] for u in used) + ")만 사용 — 신뢰도 하향")
                 res["fallback"] = True
             break
     if not used:
         return res
     res["available"] = True
     res["inputs"] = used
+    res["earnings_based"] = any(u["key"] in EARNINGS_KEYS for u in used)
     for s in SCENARIOS:
         vals = [u["results"][s]["per_share"] for u in used if u["results"][s]["per_share"] is not None]
         res["scenarios"][s] = {"per_share": sum(vals) / len(vals) if vals else None,
@@ -382,7 +388,7 @@ def method_history(target: CompanyMetrics, fs: FinSeries, monthly_caps: pd.Serie
             res["notes"].append(f"{label}: 현재 기준지표 0 이하 → 적용 불가")
             continue
         qs = _quantiles(vals)
-        dsp = dispersion(qs)
+        dsp = dispersion(qs, vals)
         if dsp is None or dsp > MAX_MULTIPLE_DISPERSION:
             res["notes"].append(f"{label}: 과거 {len(vals)}개 관측 분산 과대(상위/하위 {dsp or 0:.1f}배, 범위 {min(vals):.1f}~{max(vals):.1f}배) → 제외")
             res.setdefault("excluded", []).append({"multiple": label, "quantiles": qs, "dispersion": dsp, "range": [min(vals), max(vals)], "n": len(vals)})
@@ -401,6 +407,7 @@ def method_history(target: CompanyMetrics, fs: FinSeries, monthly_caps: pd.Serie
         return res
     res["available"] = True
     res["inputs"] = used
+    res["earnings_based"] = any(u["key"] in EARNINGS_KEYS for u in used)
     for s in SCENARIOS:
         vals = [u["results"][s]["per_share"] for u in used if u["results"][s]["per_share"] is not None]
         res["scenarios"][s] = {"per_share": sum(vals) / len(vals) if vals else None,
@@ -445,32 +452,43 @@ def method_forward(target: CompanyMetrics, fs: FinSeries, schedule: dict, peer_r
             res["notes"].append("적용할 EV/정상EBIT 배수(비교기업·자사 과거)가 없어 미래이익 기반 평가 불가")
             return res
     m_base = mult_src[1]["base"]
+    from app.services.normalize import sum_q
+
+    lq = mv.get("latest_quarter")
+    op8 = sum_q(fs, "operating_income", lq, 8) if (fs is not None and lq) else None
+    if op8 is None:
+        res["notes"].append("최근 8개 분기 영업이익 이력이 없어 향후 이익을 정상화 기준으로 환산할 수 없음 → 적용 불가")
+        return res
     res["available"] = True
+    res["earnings_based"] = True
     res["assumptions"] = {
         "backlog": schedule["official_backlog"], "backlog_source": "정기보고서 수주상황 표", "backlog_as_of": schedule["as_of"],
         "forward_revenue": {s: schedule["scenarios"][s]["revenue"] for s in SCENARIOS}, "recognition_rule": schedule["rule"],
         "op_margin": opm, "op_margin_basis": "보수 min(3년 평균, TTM) · 기준 3년(12분기) 평균 · 낙관 max",
-        "multiple_source": mult_src[0], "multiple": m_base, "multiples": mult_src[1],
+        "multiple_source": mult_src[0], "multiple": m_base, "multiples": mult_src[1], "op_last8": op8,
+        "normalization": "향후 정상 EBIT = (최근 8개 분기 영업이익 + 향후 12개월 영업이익) ÷ 3 — 배수(EV/정상EBIT)와 같은 3년 평균 기준",
         "undisclosed_contracts": schedule["undisclosed_contracts"], "undisclosed_pool": schedule["undisclosed_pool"],
     }
     for s in SCENARIOS:
         rev = schedule["scenarios"][s]["revenue"]
         ebit = rev * opm[s]
-        if ebit > 0:
-            evv = ebit * m_base
+        ebit_n = (op8 + ebit) / 3
+        if ebit_n > 0:
+            evv = ebit_n * m_base
             eq = _equity_from_ev(evv, mv)
         else:
             evv, eq = None, max(0.0, -(mv.get("net_debt") or 0.0) - (mv.get("minority_interest") or 0.0))
-        res["scenarios"][s] = {"forward_revenue": rev, "forward_ebit": ebit, "multiple": m_base, "enterprise_value": evv,
+        res["scenarios"][s] = {"forward_revenue": rev, "forward_ebit": ebit, "forward_ebit_norm": ebit_n, "multiple": m_base, "enterprise_value": evv,
                                "equity_value": eq, "per_share": _per_share(eq, mv)}
     res["notes"].extend(schedule.get("notes", []))
     b = res["scenarios"]["base"]
     res["eid"] = ev.add("estimate", f"{target.name} 미래이익(수주 납기) 기반 주당가치(기준)", b["per_share"], "KRW/주",
                         f"{b['per_share']:,.0f}원" if b["per_share"] else "N/A",
                         method=f"향후 12개월 납기 도래 수주잔고 {fmt_krw(b['forward_revenue'])} × 영업이익률 {opm['base']:.1%}(12분기 평균)"
-                               f" × EV/정상EBIT {m_base:.1f}배({mult_src[0]}) − 순차입금 − 비지배지분 → 주당가치",
+                               f" = 향후 영업이익 {fmt_krw(b['forward_ebit'])} → 정상 EBIT 환산 (최근 8분기 {fmt_krw(op8)} + 향후) ÷ 3"
+                               f" = {fmt_krw(b['forward_ebit_norm'])} × EV/정상EBIT {m_base:.1f}배({mult_src[0]}) − 순차입금 − 비지배지분 → 주당가치",
                         source="ValueScope 추정(명시적 가정)", impact="수주 납기 기반 향후 이익 반영",
-                        detail={"assumptions": res["assumptions"]})
+                        detail={"assumptions": res["assumptions"], "scenarios": res["scenarios"]})
     return res
 
 
@@ -542,6 +560,8 @@ def combine(methods: list[dict], price: float | None, peer_count: int, earnings_
         reason = "적용 가능한 평가 방법이 없음"
     elif len(avail) < 2:
         reason = "독립 평가 방법이 2개 미만"
+    elif not any(m.get("earnings_based") for m in avail):
+        reason = "이익 기반 평가(정상 EBIT·순이익 배수, 수주 기반 이익)를 적용할 수 없음(적자 등) — 매출·자산 배수만으로는 판단하지 않음"
     elif out.get("method_dispersion") and out["method_dispersion"] > MAX_METHOD_DISAGREEMENT:
         reason = (f"평가 방법 간 기준값이 {out['method_dispersion']:.1f}배 차이(>{MAX_METHOD_DISAGREEMENT:.0f}배) — "
                   "방법 간 결론이 불일치해 단일 판단을 내리지 않음")

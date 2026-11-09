@@ -105,7 +105,7 @@ def test_metrics_and_negative_earnings(db, company):
 
 def test_combine_verdict_rules():
     ev = eng.Evidence()
-    mk = lambda name, lo, b, hi: {"method": name, "label": name, "available": True, "notes": [],
+    mk = lambda name, lo, b, hi: {"method": name, "label": name, "available": True, "notes": [], "earnings_based": True,
                                   "scenarios": {"conservative": {"per_share": lo}, "base": {"per_share": b}, "optimistic": {"per_share": hi}},
                                   "assumptions": {}}
     methods = [mk("peer", 80, 100, 120), mk("history", 90, 110, 130), {"method": "forward", "label": "f", "available": False, "notes": ["없음"], "scenarios": {}}]
@@ -223,4 +223,32 @@ def test_report_flags_ai_numbers_not_in_evidence():
     assert paras["overall.1"]["status"] == "verified"
     assert paras["overall.2"]["status"] == "unverified"
     assert paras["conclusion.1"]["status"] == "unverified"  # writer verdict 고평가 ≠ engine 적정
+
+
+def test_review_agent_low_severity_on_unsupported_is_forced_high():
+    ev = eng.Evidence()
+    e1 = ev.add("fact", "영업이익", 1e11, "KRW", "1,000억원")
+
+    class AI:
+        name = "fake"
+        model = "m"
+
+        def __init__(self):
+            self.n = 0
+
+        def complete_json(self, system, prompt, schema):
+            from app.services.ai import AIResult
+            self.n += 1
+            if self.n == 1:
+                return AIResult(provider="fake", model="m", data={"summary": "s", "final_verdict": "적정", "sections": [
+                    {"key": "overall", "paragraphs": [{"text": "영업이익 1,000억원, 원인은 파생손실", "evidence_ids": [e1], "claim_type": "judgment"},
+                                                      {"text": "영업이익 1,000억원", "evidence_ids": [e1], "claim_type": "fact"}]}]})
+            return AIResult(provider="fake", model="m", data={"counter_evidence_reviewed": True, "overall_comment": "",
+                            "issues": [{"paragraph_ref": "overall.1", "type": "unsupported", "severity": "low", "message": "원인 단정 근거 없음"},
+                                       {"paragraph_ref": "overall.2", "type": "missing_counter", "severity": "low", "message": "반대 근거 약함"}]})
+
+    rep = generate_report(AI(), {"name": "T", "verdict": "적정"}, ev.items)
+    paras = {p["ref"]: p for s in rep["content"]["sections"] for p in s["paragraphs"]}
+    assert paras["overall.1"]["status"] == "unverified"  # fix 6: unsupported forced to high
+    assert paras["overall.2"]["status"] == "verified"  # missing_counter may stay low
     assert rep["content"]["final_verdict"] == "적정"

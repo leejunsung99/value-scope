@@ -211,6 +211,12 @@ def contract_book(db: Session, company_id: int, as_of: date) -> dict:
         latest = filings[-1]
         amount = next((f.amount for f in reversed(filings) if f.amount is not None), None)
         status = "cancelled" if any(f.is_cancellation for f in filings) else ("completed" if latest.completed else "active")
+        end_undetermined = latest.end_date is None and any(f.end_date for f in filings[:-1])
+        if status == "active":
+            end_d = date.fromisoformat(latest.end_date) if latest.end_date else None
+            wh = date.fromisoformat(latest.withheld_until) if latest.withheld_until else None
+            if (end_d and end_d < as_of) or (amount is None and wh and wh < as_of and (end_d is None or end_d < as_of)):
+                status = "lapsed"  # 납기·유보기한 경과, 이행완료·금액 재공시 없음
         remaining = None
         if amount is not None:
             if status != "active":
@@ -228,7 +234,8 @@ def contract_book(db: Session, company_id: int, as_of: date) -> dict:
             "status": status, "remaining_estimate": remaining, "filings": len(filings),
             "first_rcept_no": filings[0].rcept_no, "latest_rcept_no": latest.rcept_no,
             "latest_url": latest.url, "first_filed": filings[0].filed_date, "latest_filed": latest.filed_date,
-            "sales_ratio": latest.sales_ratio,
+            "sales_ratio": latest.sales_ratio, "end_undetermined": end_undetermined,
+            "end_history": [f.end_date for f in filings if f.end_date],
         })
     contracts.sort(key=lambda c: c["contract_date"] or c["first_filed"], reverse=True)
     active = [c for c in contracts if c["status"] == "active"]
@@ -238,6 +245,7 @@ def contract_book(db: Session, company_id: int, as_of: date) -> dict:
         "contracts_total": len(contracts),
         "duplicates_merged": len(rows) - len(contracts),
         "active_count": len(active),
+        "lapsed_count": sum(1 for c in contracts if c["status"] == "lapsed"),
         "undisclosed_active": sum(1 for c in active if not c["amount_disclosed"]),
         "backlog_estimate": sum(c["remaining_estimate"] or 0 for c in active),
         "as_of": as_of.isoformat(),

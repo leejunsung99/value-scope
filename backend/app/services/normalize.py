@@ -106,7 +106,7 @@ def forward_schedule(book: dict, official: dict | None, today: date) -> dict:
     d0 = date(int(y), int(m), 28) + timedelta(days=4)
     d0 = d0 - timedelta(days=d0.day)  # 보고 기준 월말
     last_delivery = date.fromisoformat(official["last_delivery"]) if official.get("last_delivery") else None
-    pieces, notes = [], []
+    pieces, notes, undetermined = [], [], []
     disclosed_rem = 0.0
     undisclosed = []
     for c in book["contracts"]:
@@ -116,6 +116,15 @@ def forward_schedule(book: dict, official: dict | None, today: date) -> dict:
         end = date.fromisoformat(c["end_date"]) if c.get("end_date") else None
         if end is not None and end < d0:
             continue  # 보고 기준일 이전 납기 — 잔고에 없음
+        if end is None:
+            # 종료일 '-'(미정) — 납기 연기 이력이 있으면 특히 위험. 향후 12개월 매출에서 제외하고 별도 표시
+            amt = c["amount"] if c["amount_disclosed"] and c["amount"] else None
+            if amt:
+                disclosed_rem += amt
+            undetermined.append({"label": c["counterparty"] or c["description"] or "계약", "amount": amt,
+                                 "rcept_no": c["latest_rcept_no"], "contract_date": c["contract_date"],
+                                 "end_history": c.get("end_history", []), "delays": max(0, len(set(c.get("end_history", []))) - 1)})
+            continue
         if c["amount_disclosed"] and c["amount"]:
             if start and end and end > start:
                 rem = c["amount"] * min(1.0, max(0.0, (end - max(d0, start)).days / (end - start).days))
@@ -128,12 +137,19 @@ def forward_schedule(book: dict, official: dict | None, today: date) -> dict:
             undisclosed.append(c)
     pool = max(0.0, official["amount"] - disclosed_rem)
     if pool > 0 and undisclosed:
-        share = pool / len(undisclosed)
+        # 계약기간(체결~납기) 비례 배분: 대형 증착라인일수록 제작·설치 기간이 길다는 가정
+        durs = []
         for c in undisclosed:
-            end = date.fromisoformat(c["end_date"]) if c.get("end_date") else last_delivery
-            pieces.append({"label": c["counterparty"] or c["description"] or "비공개 계약", "amount": share, "end": end,
-                           "disclosed": False, "rcept_no": c["latest_rcept_no"], "contract_date": c["contract_date"]})
-        notes.append(f"금액 비공개 잔고 {pool:,.0f}원(공식 수주잔고 − 공시 계약 잔여액)을 비공개 진행 계약 {len(undisclosed)}건에 균등 배분(가정)")
+            s0 = date.fromisoformat(c["start_date"]) if c.get("start_date") else d0
+            e0 = date.fromisoformat(c["end_date"])
+            durs.append(max((e0 - s0).days, 30))
+        tot_d = sum(durs)
+        for c, du in zip(undisclosed, durs):
+            pieces.append({"label": c["counterparty"] or c["description"] or "비공개 계약", "amount": pool * du / tot_d,
+                           "end": date.fromisoformat(c["end_date"]), "disclosed": False, "rcept_no": c["latest_rcept_no"],
+                           "contract_date": c["contract_date"], "weight": du / tot_d})
+        notes.append(f"금액 비공개 잔고 {pool:,.0f}원(공식 수주잔고 − 공시 계약 잔여액)을 비공개 진행 계약 {len(undisclosed)}건에 "
+                     f"계약기간 비례로 배분(가정)")
     elif pool > 0:
         pieces.append({"label": "계약 미특정 잔고", "amount": pool, "end": last_delivery, "disclosed": False, "rcept_no": None,
                        "contract_date": None})
@@ -158,7 +174,9 @@ def forward_schedule(book: dict, official: dict | None, today: date) -> dict:
     return {
         "available": True, "as_of": d0.isoformat(), "official_backlog": official["amount"], "disclosed_remaining": disclosed_rem,
         "undisclosed_pool": pool, "undisclosed_contracts": len(undisclosed), "horizon": [horizon[0].isoformat(), horizon[1].isoformat()],
-        "scenarios": scen, "notes": notes,
+        "scenarios": scen, "notes": notes + ([f"납기 미정 계약 {len(undetermined)}건(" + ", ".join(
+            f"{u['label'][:20]} 연기 {u['delays']}회" for u in undetermined) + ")은 향후 12개월 매출에서 제외"] if undetermined else []),
+        "undetermined": undetermined, "undetermined_amount": sum(u["amount"] or 0 for u in undetermined),
         "pieces": [{**p, "end": p["end"].isoformat() if p["end"] else None} for p in sorted(pieces, key=lambda x: x["end"] or date.max)],
         "rule": "납기(계약 종료일)에 매출 인식 가정 · 보수=납기 6개월 지연 · 낙관=3개월 조기",
     }

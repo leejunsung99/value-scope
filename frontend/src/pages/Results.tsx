@@ -93,6 +93,7 @@ function MethodCard({ m }: { m?: MethodResult }) {
           <div>향후 12개월 납기 도래 매출: {Object.entries(m.assumptions.forward_revenue ?? {}).map(([k, v]) => `${SCENARIO_LABEL[k as 'base']} ${krw(v)}`).join(' · ')}</div>
           <div>영업이익률: {Object.entries(m.assumptions.op_margin ?? {}).map(([k, v]) => `${SCENARIO_LABEL[k as 'base']} ${pct(v)}`).join(' · ')} ({m.assumptions.op_margin_basis})</div>
           <div>EV/정상EBIT {m.assumptions.multiple?.toFixed(1)}배 — {m.assumptions.multiple_source}</div>
+          {m.assumptions.normalization && <div>{m.assumptions.normalization} (최근 8분기 영업이익 {krw(m.assumptions.op_last8)})</div>}
         </div>
       )}
       {m.notes.map((n, i) => <div key={i} className="mt-1 text-amber-700 dark:text-amber-400">· {n}</div>)}
@@ -143,7 +144,7 @@ export function ContractsTable({ v }: { v: ValuationResult }) {
     <div className="text-xs">
       <div className="mb-2 flex flex-wrap gap-3 text-slate-600 dark:text-slate-400">
         <span>공시 {book.filings_total}건 → 계약 {book.contracts_total}건 (정정공시 {book.duplicates_merged}건 병합, 중복 집계 방지)</span>
-        <span>진행 중 {book.active_count}건 (금액 비공개 {book.undisclosed_active}건)</span>
+        <span>진행 중 {book.active_count}건 (금액 비공개 {book.undisclosed_active}건){book.lapsed_count ? ` · 기간 경과·완료 미공시 ${book.lapsed_count}건` : ''}</span>
         {bl?.amount != null && <span>수주잔고 <EvidenceLink ids={[bl.eid]}>{krw(bl.amount)}</EvidenceLink> — {bl.source_label}</span>}
       </div>
       <div className="max-h-72 overflow-y-auto">
@@ -157,7 +158,7 @@ export function ContractsTable({ v }: { v: ValuationResult }) {
                 <td className="max-w-[200px] truncate" title={c.description ?? ''}>{c.description}</td>
                 <td className="tabular text-right">{c.amount_disclosed ? krw(c.amount) : <span className="text-amber-700">비공개{c.withheld_until ? `(~${c.withheld_until})` : ''}</span>}</td>
                 <td className="tabular text-slate-500">{c.start_date?.slice(2)}~{c.end_date?.slice(2)}</td>
-                <td>{c.status === 'active' ? <Badge tone="blue">진행</Badge> : c.status === 'completed' ? <Badge tone="green">이행완료</Badge> : <Badge tone="red">해지</Badge>}</td>
+                <td>{c.status === 'active' ? (c.end_undetermined ? <Badge tone="amber">진행·납기 미정</Badge> : <Badge tone="blue">진행</Badge>) : c.status === 'completed' ? <Badge tone="green">이행완료</Badge> : c.status === 'lapsed' ? <Badge>기간 경과·완료 미공시</Badge> : <Badge tone="red">해지</Badge>}</td>
                 <td className="tabular text-right text-slate-500">{c.remaining_estimate != null ? krw(c.remaining_estimate) : '—'}</td>
                 <td><a href={c.latest_url} target="_blank" rel="noreferrer" className="text-blue-600 hover:underline">{c.filings > 1 ? `${c.filings}건(정정 포함)` : '원문'}</a></td>
               </tr>
@@ -216,7 +217,7 @@ export function ScheduleTable({ v }: { v: ValuationResult | null }) {
     <div className="mt-2 text-xs">
       <div className="mb-1 text-slate-600 dark:text-slate-400">
         공식 수주잔고 {krw(s.official_backlog)}({s.as_of}) = 공시 계약 잔여 {krw(s.disclosed_remaining)} + 금액 비공개 {krw(s.undisclosed_pool)}
-        (비공개 계약 {s.undisclosed_contracts}건 균등 배분) · 기간 {s.horizon?.join(' ~ ')}
+        (비공개 계약 {s.undisclosed_contracts}건에 계약기간 비례 배분) · 기간 {s.horizon?.join(' ~ ')}
         {s.lumpiness != null && <> · 분기 매출 변동계수 {s.lumpiness.toFixed(2)} (납품 시점 인식 근거)</>}
         {s.eid && <> · <EvidenceLink ids={[s.eid]}>근거</EvidenceLink></>}
       </div>
@@ -227,10 +228,15 @@ export function ScheduleTable({ v }: { v: ValuationResult | null }) {
           {s.pieces?.map((p, i) => (
             <tr key={i}><td className="max-w-[220px] truncate py-0.5" title={p.label}>{p.label}</td><td className="tabular">{p.contract_date ?? '—'}</td>
               <td className="tabular">{p.end ?? '—'}{p.end_assumed && ' (가정)'}</td><td className="tabular text-right">{krw(p.amount)}</td>
-              <td>{p.disclosed ? <Badge tone="green">공시</Badge> : <Badge tone="amber">비공개·배분</Badge>}</td></tr>
+              <td>{p.disclosed ? <Badge tone="green">공시</Badge> : <Badge tone="amber">비공개·배분{p.weight != null ? ` ${(p.weight * 100).toFixed(0)}%` : ''}</Badge>}</td></tr>
           ))}
         </tbody>
       </table>
+      {!!s.undetermined?.length && (
+        <div className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-[11px] text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200">
+          납기 미정 계약(향후 12개월 매출에서 제외, 합계 {krw(s.undetermined_amount)}): {s.undetermined.map((u) => `${u.label} ${u.amount != null ? krw(u.amount) : '금액 비공개'} — 납기 변경 이력 ${u.end_history.join(' → ')} → 미정`).join(' / ')}
+        </div>
+      )}
       {s.notes?.map((n, i) => <div key={i} className="mt-1 text-[11px] text-slate-500">· {n}</div>)}
     </div>
   )

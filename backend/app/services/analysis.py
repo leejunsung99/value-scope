@@ -261,11 +261,16 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
                     period=f"{sched['horizon'][0]} ~ {sched['horizon'][1]}", as_of=sched["as_of"], company=c,
                     method=(f"공식 수주잔고 {eng.fmt_krw(sched['official_backlog'])}({sched['as_of']}) 중 납기가 향후 12개월에 드는 금액. "
                             f"공시 계약 잔여액 {eng.fmt_krw(sched['disclosed_remaining'])}, 비공개 잔고 {eng.fmt_krw(sched['undisclosed_pool'])}"
-                            f"(비공개 계약 {sched['undisclosed_contracts']}건 균등 배분). {sched['rule']}. "
+                            f"(비공개 계약 {sched['undisclosed_contracts']}건에 계약기간 비례 배분: "
+                            + ", ".join(f"{p['label'][:24]} {eng.fmt_krw(p['amount'])}·납기 {p['end']}" for p in sched["pieces"] if not p["disclosed"])
+                            + f"). {sched['rule']}. "
                             f"시나리오: 보수 {eng.fmt_krw(sched['scenarios']['conservative']['revenue'])} · 낙관 {eng.fmt_krw(sched['scenarios']['optimistic']['revenue'])}"
-                            + (f". 납품 시점 인식 근거: 최근 8개 분기 매출 변동계수 {lump:.2f}" if lump is not None else "")),
+                            + (f". 납품 시점 인식 근거: 최근 8개 분기 매출 변동계수 {lump:.2f}" if lump is not None else "")
+                            + "".join(f". 납기 미정 계약(향후 매출 제외): {u['label'][:30]} {eng.fmt_krw(u['amount']) if u['amount'] else '금액 비공개'}"
+                                      f", 납기 변경 {' → '.join(u['end_history'])} → 미정(연기 {u['delays']}회)" for u in sched.get("undetermined", []))),
                     source="OpenDART 정기보고서·수주공시", impact="미래이익(수주) 기반 평가의 매출 가정",
-                    detail={"scenarios": sched["scenarios"], "pieces": sched["pieces"][:30], "lumpiness": lump})
+                    detail={"scenarios": sched["scenarios"], "pieces": sched["pieces"][:30], "lumpiness": lump,
+                            "undetermined": sched.get("undetermined", [])})
             backlog_info[c.id] = {"book": book, "backlog": bl, "schedule": sched}
             peer_res = eng.method_peer(cm[c.id], comps, ev)
             hist_res = {"method": "history", "label": eng.METHOD_LABEL["history"], "available": False, "notes": ["시세 이력 없음"], "scenarios": {}}
@@ -279,7 +284,8 @@ def execute_run(session_factory: sessionmaker, run_id: str, dart: DartClient, kr
             recent_q = fs_map[c.id].quarters("operating_income")[-4:]
             unstable = sum(1 for q in recent_q if (fs_map[c.id].qval("operating_income", q) or 0) < 0) >= 2
             comb = eng.combine([fwd_res, peer_res, hist_res], cm[c.id].values.get("price"), peer_res.get("peer_count", 0),
-                               unstable, book["undisclosed_active"], ev, c.name, official_backlog=bool(ob))
+                               unstable, sched["undisclosed_contracts"] if sched.get("available") else book["undisclosed_active"],
+                               ev, c.name, official_backlog=bool(ob))
             valuations[c.id] = {"forward": fwd_res, "peer": peer_res, "history": hist_res, "combined": comb, "unstable": unstable}
             rl.step(c.id, "valuation", "done", f"{comb['verdict']} · 신뢰도 {comb['confidence']:.0f}")
 
