@@ -1,19 +1,24 @@
-// 주간 주가 리포트 (/print/projects/:projectId/weekly/:weeklyId) — A4 세로 2~3쪽 보고서 양식.
-//  1쪽: 주간 결론(판정·핵심 수치) + 주가 경로 + 요약·동조 여부
-//  2쪽: 일별 실제 vs 기대 vs 개별 요인 + 일별 상세(공시·보도) + 개별 요인 해석
-//  3쪽: 비교기업별 움직임 · 변동성 · 이번 주 공시·보도 · 다음 주 확인할 점 · 분석 방법 · 고지
-// 검증을 통과한 해석 문단만 싣는다(미통과 문단은 제외).
+// 주간 주가 리포트 (/print/projects/:projectId/weekly/:weeklyId) — A4 세로 3쪽, 리포트 문체.
+// 통계·모형 용어(z값, 기대수익률, 개별 요인 등)와 분석 방법 설명은 싣지 않는다(화면에서만 확인).
+//  1쪽: 이번 주 흐름(판정·핵심 수치) + 주가 경로 + 주간 요약 + 비교기업과의 동조
+//  2쪽: 회사 고유 이슈 + 일별 등락률 비교 + 일별 주요 공시·보도 + 변동성·거래량
+//  3쪽: 비교기업별 움직임 + 이번 주 공시·보도 + 다음 주 체크포인트
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, type ReactNode } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
 import { addDays, weeklyApi, type WeeklyReport as Rep, type WeeklyResult } from '../apiWeekly'
-import { WeeklyDailyChart, WeeklyPathChart } from '../charts'
-import { fmtDateTime } from '../ui'
+import { WeeklyCompareChart, WeeklyPathChart } from '../charts'
 import { Td, Th } from './PrintReport'
 
 const pct = (v: number | null | undefined, d = 1) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(d)}%`)
 const pp = (v: number | null | undefined) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%p`)
+const md = (iso: string) => `${Number(iso.slice(5, 7))}월 ${Number(iso.slice(8, 10))}일`
 const TONE: Record<string, string> = { comove: 'bg-blue-800', idiosyncratic: 'bg-red-700', mixed: 'bg-amber-600' }
+/** '비교기업과 동반 하락 (비교기업보다 10.8%p 약세)' → ['비교기업과 동반 하락', '비교기업보다 10.8%p 약세'] */
+export function splitLabel(label: string): [string, string | null] {
+  const m = /^(.*?)\s*\((.*)\)\s*$/.exec(label)
+  return m ? [m[1], m[2]] : [label, null]
+}
 
 function H({ no, children }: { no: string; children: ReactNode }) {
   return <h2 className="mb-2 mt-5 flex items-baseline gap-2 border-b-2 border-slate-900 pb-1 text-[14px] font-bold first:mt-0"><span className="text-violet-800">{no}</span>{children}</h2>
@@ -30,7 +35,32 @@ function Fig({ title, source, children, note }: { title: string; source: string;
 function Body({ rep, keyName }: { rep?: Rep; keyName: string }) {
   const sec = rep?.sections.find((s) => s.key === keyName)
   if (!sec?.paragraphs.length) return null
-  return <div className="space-y-1.5">{sec.paragraphs.map((p) => <p key={p.ref} className="text-justify text-[10.5px] leading-[1.75]">{p.text}</p>)}</div>
+  return <div className="space-y-1.5">{sec.paragraphs.map((p) => <p key={p.ref} className="text-justify text-[10.5px] leading-[1.8]">{p.text}</p>)}</div>
+}
+
+/** '첫째, … 둘째, …'로 이어 쓴 문장도 항목별로 나눈다. */
+export function splitCheckpoints(texts: string[]): string[] {
+  return texts
+    .flatMap((t) => t.split(/\s*(?:첫째|둘째|셋째|넷째|다섯째|마지막으로)\s*,?\s*/))
+    .map((t) => t.trim())
+    .filter(Boolean)
+}
+
+/** 다음 주 체크포인트: 번호 목록으로 한 줄씩 띄워서 */
+function Checkpoints({ rep }: { rep?: Rep }) {
+  const sec = rep?.sections.find((s) => s.key === 'watch')
+  const items = splitCheckpoints((sec?.paragraphs ?? []).map((p) => p.text))
+  if (!items.length) return null
+  return (
+    <ol className="space-y-2.5">
+      {items.map((t, i) => (
+        <li key={i} className="flex gap-2.5 text-[10.5px] leading-[1.75]">
+          <span className="mt-[1px] flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full bg-violet-800 text-[9.5px] font-bold text-white">{i + 1}</span>
+          <span className="text-justify">{t}</span>
+        </li>
+      ))}
+    </ol>
+  )
 }
 
 export default function WeeklyReport() {
@@ -54,13 +84,16 @@ export default function WeeklyReport() {
   const r = w.result as WeeklyResult
   const rep = w.report
   const s = r.summary
-  const names = Object.fromEntries(r.peers.map((p) => [String(p.company_id), p.name]))
   const target = w.company_name || '고객사'
+  const names = Object.fromEntries(r.peers.map((p) => [String(p.company_id), p.name]))
   const wkLabel = `${r.week.start.replace(/-/g, '.')}(월) ~ ${addDays(r.week.start, 6).slice(5).replace('-', '.')}(일)`
+  const mkt = r.model.market_label.split(' ')[0]
   const vol = r.volatility
-  const events = [...r.disclosures.map((x) => ({ ...x, kind: '공시', title: x.title, extra: '' })),
-    ...r.news.map((x) => ({ ...x, kind: '보도', title: x.event, extra: `${x.outlets.join(', ')}${x.verification === 'confirmed' ? ' · 공시로 확인' : ' · 기사로만 확인'}` }))]
+  const events = [...r.disclosures.map((x) => ({ date: x.date, company: x.company, kind: '공시', title: x.title, extra: '', estimated: false })),
+    ...r.news.map((x) => ({ date: x.date, company: x.company, kind: '보도', title: x.event, estimated: !x.date_certain,
+      extra: `${x.outlets.slice(0, 2).join(', ')}${x.verification === 'confirmed' ? ' · 공시로 확인' : ''}` }))]
     .sort((a, b) => b.date.localeCompare(a.date))
+  const hasUnusual = r.days.some((d) => d.abnormal)
 
   return (
     <div className="print-report brief bg-white text-[10.5px] leading-relaxed text-slate-900">
@@ -69,144 +102,157 @@ export default function WeeklyReport() {
         <div className="flex items-end justify-between border-b-[3px] border-slate-900 pb-2">
           <div>
             <div className="text-[9px] font-semibold uppercase tracking-[0.2em] text-violet-800">Weekly Price Report</div>
-            <h1 className="text-[26px] font-bold leading-tight">{target} <span className="text-[13px] font-normal text-slate-500">주간 주가 분석</span></h1>
+            <h1 className="text-[26px] font-bold leading-tight">{target} <span className="text-[13px] font-normal text-slate-500">주간 주가 동향</span></h1>
           </div>
           <div className="text-right text-[9px] text-slate-500">
             <div className="text-[11px] font-semibold text-slate-800">{wkLabel}</div>
-            <div>거래일 {r.week.trading_days}일 · 기준 {r.week.base_date} 종가 · 비교군 v{w.peer_version_no}</div>
-            <div>분석 {fmtDateTime(w.finished_at)}</div>
+            <div>{r.week.trading_days}거래일 · {md(r.week.base_date)} 종가 대비</div>
           </div>
         </div>
         {rep?.headline && <p className="mt-3 text-[12.5px] font-semibold leading-[1.65]">{rep.headline}</p>}
 
-        <div className="mt-3 grid grid-cols-[180px_1fr] gap-5">
+        <div className="mt-3 grid grid-cols-[196px_1fr] gap-5">
           <aside className="space-y-2">
             <div className={`${TONE[s.pattern] ?? 'bg-slate-600'} rounded px-3 py-2 text-white`}>
-              <div className="text-[9px] opacity-80">주간 판정</div>
-              <div className="text-[14px] font-bold leading-snug">{s.pattern_label}</div>
+              <div className="text-[9px] opacity-80">이번 주 흐름</div>
+              <div className="text-[14px] font-bold leading-snug">{splitLabel(s.pattern_label)[0]}</div>
+              {splitLabel(s.pattern_label)[1] && <div className="mt-0.5 text-[11px] font-semibold opacity-90">{splitLabel(s.pattern_label)[1]}</div>}
             </div>
             <div className={`rounded border px-3 py-1.5 text-[10px] ${s.volatility_flags.length ? 'border-red-300 text-red-700' : 'border-slate-300 text-slate-600'}`}>
-              변동성: <b>{s.volatility_label}</b>{s.abnormal_days.length ? ` · 이상 변동일 ${s.abnormal_days.map((d) => d.slice(5)).join(', ')}` : ' · 이상 변동일 없음'}
+              {s.volatility_label}
             </div>
             <table className="w-full text-[9.5px]">
               <tbody>
                 {[
-                  [`${target} 주간`, pct(s.target_return)],
-                  ['종가', r.week.base_close && r.week.last_close ? `${r.week.base_close.toLocaleString()} → ${r.week.last_close.toLocaleString()}원` : '—'],
-                  ['비교군 가중평균', pct(s.peer_return)],
-                  ['시장 대용지수', pct(s.market_return)],
-                  ['비교군 대비', pp(s.excess_vs_peers)],
+                  ['주간 수익률', pct(s.target_return)],
+                  ['종가', r.week.base_close && r.week.last_close ? `${r.week.base_close.toLocaleString()}→${r.week.last_close.toLocaleString()}원` : '—'],
+                  ['비교기업 평균', pct(s.peer_return)],
+                  [`시장(${mkt})`, pct(s.market_return)],
+                  ['비교기업 대비', pp(s.excess_vs_peers)],
                   ['시장 대비', pp(s.excess_vs_market)],
-                  ['개별 요인 합계', `${pct(s.residual_sum)}${s.z_week != null ? ` (z ${s.z_week.toFixed(2)})` : ''}`],
-                  ['같은 방향', `${s.same_dir_days}/${s.judged_days}일`],
-                ].map(([k, v]) => <tr key={k}><Td className="text-slate-500">{k}</Td><Td right strong>{v}</Td></tr>)}
+                  ['같은 방향(비교기업)', `${s.judged_days}일 중 ${s.same_dir_days}일`],
+                ].map(([k, v]) => <tr key={k}><Td className="whitespace-nowrap text-slate-500">{k}</Td><Td right strong className="whitespace-nowrap">{v}</Td></tr>)}
               </tbody>
             </table>
           </aside>
-          <div>
-            <Fig title={`그림 1. 주가 경로 — ${target} · 비교군 · 시장 (직전 거래일 = 100)`} source="KRX, ValueScope" note="회색 선 = 개별 비교기업">
-              <WeeklyPathChart chart={r.chart} names={names} targetName={target} />
-            </Fig>
-          </div>
+          <Fig title={`그림 1. 주가 흐름 — ${target} · 비교기업 평균 · 시장 (${md(r.week.base_date)} = 100)`} source="KRX" note="회색 선: 개별 비교기업">
+            <WeeklyPathChart chart={r.chart} names={names} targetName={target} />
+          </Fig>
         </div>
         <H no="1.">주간 요약</H>
         <Body rep={rep} keyName="overview" />
-        <H no="2.">비교군 동조 여부</H>
+        <H no="2.">비교기업과의 동조</H>
         <Body rep={rep} keyName="comovement" />
       </section>
 
       {/* ============ 2쪽 */}
       <section className="pr-page-break">
-        <H no="3.">개별 요인과 이벤트</H>
+        <H no="3.">{rep?.sections.find((x) => x.key === 'drivers')?.title ?? '비교기업 대비 흐름의 배경'}</H>
+        <Body rep={rep} keyName="drivers" />
+        {r.context?.target_pre != null && (
+          <Fig title={`표 1. 직전 4주 · 이번 주 · 5주 누적 수익률 (${r.context.pre_start ? md(r.context.pre_start) : ''}~${md(r.week.end)})`} source="KRX"
+            note="직전 4주에 덜 내린(더 오른) 종목일수록 이번 주 하락폭이 컸는지 함께 보기 위한 표">
+            <table className="w-full text-[9.5px]">
+              <thead><tr><Th>구분</Th><Th right>직전 4주</Th><Th right>이번 주</Th><Th right>5주 누적</Th></tr></thead>
+              <tbody>
+                <tr className="bg-blue-50 font-semibold"><Td>{target}</Td><Td right>{pct(r.context.target_pre)}</Td><Td right>{pct(s.target_return)}</Td><Td right>{pct(r.context.target_5w)}</Td></tr>
+                <tr className="font-semibold"><Td>비교기업 평균</Td><Td right>{pct(r.context.peer_pre)}</Td><Td right>{pct(s.peer_return)}</Td><Td right>{pct(r.context.peer_5w)}</Td></tr>
+                <tr><Td>시장({mkt})</Td><Td right>{pct(r.context.market_pre)}</Td><Td right>{pct(s.market_return)}</Td><Td right>{pct(r.context.market_5w)}</Td></tr>
+                {[...r.context.peers].sort((a, b) => b.pre_4w - a.pre_4w).map((p) => (
+                  <tr key={p.company_id} className="text-slate-600"><Td className="pl-3">{p.name}</Td><Td right>{pct(p.pre_4w)}</Td><Td right>{pct(p.week)}</Td><Td right>{pct(p.five_week)}</Td></tr>
+                ))}
+              </tbody>
+            </table>
+          </Fig>
+        )}
+        {!!r.prior_disclosures?.length && (
+          <div className="pr-keep mt-1 text-[9px] text-slate-600">
+            <b>직전 4주 회사 공시</b> — {r.prior_disclosures.map((x) => `${md(x.date)} ${x.title}`).join(' · ')}
+          </div>
+        )}
+        <H no="4.">회사 고유 이슈</H>
         <Body rep={rep} keyName="idiosyncratic" />
-        <Fig title="그림 2. 일별 실제 수익률 vs 기대(시장+비교군) vs 개별 요인" source="KRX, ValueScope 회귀분석"
-          note={`빨간 막대 = 이상 변동(|z| ≥ ${r.thresholds.z_day})`}>
-          <WeeklyDailyChart days={r.days} />
+        <Fig title={`그림 2. 일별 등락률 — ${target} · 비교기업 평균 · 시장`} source="KRX" note={hasUnusual ? `빨간 막대: 시장·업종 흐름과 다른 이례적 변동일` : undefined}>
+          <WeeklyCompareChart days={r.days} targetName={target} />
         </Fig>
-        <Fig title="표 1. 일별 상세 — 개별 변동과 공시·보도(당일~2일 전)" source="KRX, OpenDART, 언론 보도"
-          note="거래량 = 직전 20거래일 평균 대비 · ↔ = 비교군과 반대 방향 · 시간적 근접은 인과관계를 뜻하지 않음">
-          <table className="w-full text-[9px]">
-            <thead><tr><Th>날짜</Th><Th right>{target}</Th><Th right>비교군</Th><Th right>시장</Th><Th right>기대</Th><Th right>개별</Th><Th right>z</Th><Th right>거래량</Th><Th>공시·보도</Th></tr></thead>
+        <Fig title="표 2. 일별 등락과 주요 공시·보도" source="KRX, OpenDART, 언론 보도"
+          note={[r.days.some((d) => d.diverged) ? '음영: 비교기업과 방향이 반대이거나 3%p 이상 차이가 난 날' : '', hasUnusual ? '● 시장·업종 흐름과 다른 이례적 변동일' : ''].filter(Boolean).join(' · ') || undefined}>
+          <table className="w-full text-[9.5px]">
+            <thead><tr><Th>날짜</Th><Th right>{target}</Th><Th right>비교기업 평균</Th><Th right>시장</Th><Th right>거래량(평소 대비)</Th><Th>주요 공시·보도</Th></tr></thead>
             <tbody>
-              {r.days.map((d) => (
-                <tr key={d.date} className={`align-top ${d.abnormal ? 'bg-red-50' : ''}`}>
-                  <Td className="whitespace-nowrap">{d.date.slice(5)}({d.weekday}){d.abnormal ? ' ●' : ''}</Td>
-                  <Td right strong>{pct(d.ret, 2)}</Td>
-                  <Td right>{pct(d.peer_avg, 2)}{d.same_dir === false ? ' ↔' : ''}</Td>
-                  <Td right>{pct(d.market, 2)}</Td>
-                  <Td right className="text-slate-500">{pct(d.expected, 2)}</Td>
-                  <Td right strong>{pct(d.residual, 2)}</Td>
-                  <Td right>{d.z != null ? d.z.toFixed(1) : '—'}</Td>
+              {r.days.map((d0, i) => {
+                // 공시·보도는 '처음 반영된 거래일'에만 표시 (주말 공시는 다음 거래일)
+                const prev = i > 0 ? r.days[i - 1].date : ''
+                const fresh = <T extends { date: string }>(xs?: T[]) => xs?.filter((x) => x.date > prev && x.date <= d0.date)
+                const d = { ...d0, disclosures: fresh(d0.disclosures), news: fresh(d0.news) }
+                return (
+                <tr key={d.date} className={`align-top ${d.abnormal ? 'bg-red-50' : d.diverged ? 'bg-amber-50' : ''}`}>
+                  <Td className="whitespace-nowrap">{md(d.date)}({d.weekday}){d.abnormal ? ' ●' : ''}</Td>
+                  <Td right strong>{pct(d.ret, 1)}</Td>
+                  <Td right>{pct(d.peer_avg, 1)}</Td>
+                  <Td right>{pct(d.market, 1)}</Td>
                   <Td right>{d.volume_ratio != null ? `${d.volume_ratio.toFixed(1)}배` : '—'}</Td>
                   <Td>
                     {d.disclosures?.map((x) => <div key={x.url}>[공시] {x.title}</div>)}
                     {d.news?.map((x) => <div key={x.url}>[보도] {x.event}</div>)}
-                    {d.abnormal && <div className="text-slate-500">{d.explanation}</div>}
-                    {!d.disclosures?.length && !d.news?.length && !d.abnormal && '—'}
+                    {!d.disclosures?.length && !d.news?.length && (d.abnormal ? '확인된 공시·보도 없음' : '—')}
                   </Td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </Fig>
-        <H no="4.">변동성 · 거래량</H>
+        <H no="5.">변동성 · 거래량</H>
         <Body rep={rep} keyName="volatility" />
-        <Fig title="표 2. 변동성·거래량 (직전 대비)" source="KRX 일별매매정보"
-          note={`변동성 ${r.thresholds.vol_ratio}배 · 변동폭 ${r.thresholds.range_ratio}배 · 거래량 ${r.thresholds.volume_ratio}배 이상이면 '변동성 확대'`}>
+        <Fig title="표 3. 이번 주 등락폭·거래량 (평소 대비)" source="KRX" note="평소: 직전 약 3개월(거래량은 직전 1개월) 평균">
           <table className="w-full text-[9.5px]">
-            <thead><tr><Th>항목</Th><Th right>이번 주</Th><Th right>직전 평균</Th><Th right>배수</Th></tr></thead>
+            <thead><tr><Th>항목</Th><Th right>이번 주</Th><Th right>평소</Th><Th right>평소 대비</Th></tr></thead>
             <tbody>
-              <tr><Td>일별 수익률 변동성</Td><Td right>{vol.ret_std_week != null ? `${(vol.ret_std_week * 100).toFixed(2)}%` : '—'}</Td><Td right>{vol.ret_std_60d != null ? `${(vol.ret_std_60d * 100).toFixed(2)}% (60일)` : '—'}</Td><Td right strong>{vol.std_ratio != null ? `${vol.std_ratio.toFixed(1)}배` : '—'}</Td></tr>
-              <tr><Td>평균 일중 변동폭(고가−저가)</Td><Td right>{vol.range_week != null ? `${(vol.range_week * 100).toFixed(2)}%` : '—'}</Td><Td right>{vol.range_60d != null ? `${(vol.range_60d * 100).toFixed(2)}% (60일)` : '—'}</Td><Td right strong>{vol.range_ratio != null ? `${vol.range_ratio.toFixed(1)}배` : '—'}</Td></tr>
-              <tr><Td>평균 거래량</Td><Td right>{vol.volume_week != null ? Math.round(vol.volume_week).toLocaleString() : '—'}</Td><Td right>{vol.volume_20d != null ? `${Math.round(vol.volume_20d).toLocaleString()} (20일)` : '—'}</Td><Td right strong>{vol.volume_ratio != null ? `${vol.volume_ratio.toFixed(1)}배` : '—'}</Td></tr>
+              <tr><Td>하루 등락폭(표준적 수준)</Td><Td right>{vol.ret_std_week != null ? `${(vol.ret_std_week * 100).toFixed(1)}%` : '—'}</Td><Td right>{vol.ret_std_60d != null ? `${(vol.ret_std_60d * 100).toFixed(1)}%` : '—'}</Td><Td right strong>{vol.std_ratio != null ? `${vol.std_ratio.toFixed(1)}배` : '—'}</Td></tr>
+              <tr><Td>장중 고저 폭</Td><Td right>{vol.range_week != null ? `${(vol.range_week * 100).toFixed(1)}%` : '—'}</Td><Td right>{vol.range_60d != null ? `${(vol.range_60d * 100).toFixed(1)}%` : '—'}</Td><Td right strong>{vol.range_ratio != null ? `${vol.range_ratio.toFixed(1)}배` : '—'}</Td></tr>
+              <tr><Td>일평균 거래량</Td><Td right>{vol.volume_week != null ? `${Math.round(vol.volume_week).toLocaleString()}주` : '—'}</Td><Td right>{vol.volume_20d != null ? `${Math.round(vol.volume_20d).toLocaleString()}주` : '—'}</Td><Td right strong>{vol.volume_ratio != null ? `${vol.volume_ratio.toFixed(1)}배` : '—'}</Td></tr>
             </tbody>
           </table>
         </Fig>
       </section>
 
       {/* ============ 3쪽 */}
-      <section className="pr-page-break">
-        <H no="5.">비교기업별 움직임</H>
-        <Fig title="표 3. 비교기업 주간 수익률과 동조성" source="KRX, ValueScope" note="가중치 = STEP 1 적합성 점수 × 활용 구분 · 같은 방향 = 고객사와 일별 부호 일치 일수">
+      <section>
+        <H no="6.">비교기업별 움직임</H>
+        <Fig title="표 4. 비교기업 주간 수익률" source="KRX">
           <table className="w-full text-[9.5px]">
-            <thead><tr><Th>기업</Th><Th right>가중치</Th><Th right>주간</Th><Th right>고객사 대비</Th><Th right>같은 방향</Th><Th right>60일 상관</Th></tr></thead>
+            <thead><tr><Th>기업</Th><Th right>주간 수익률</Th><Th right>{target} 대비</Th><Th right>{target}와 같은 방향</Th></tr></thead>
             <tbody>
-              <tr className="bg-blue-50 font-semibold"><Td>{target} (고객사)</Td><Td right>—</Td><Td right>{pct(s.target_return)}</Td><Td right>—</Td><Td right>—</Td><Td right>—</Td></tr>
+              <tr className="bg-blue-50 font-semibold"><Td>{target}</Td><Td right>{pct(s.target_return)}</Td><Td right>—</Td><Td right>—</Td></tr>
               {[...r.peers].sort((a, b) => (b.week_return ?? -9) - (a.week_return ?? -9)).map((p) => (
                 <tr key={p.company_id}>
-                  <Td>{p.name}</Td><Td right>{p.weight.toFixed(2)}</Td><Td right>{p.available ? pct(p.week_return) : '시세 없음'}</Td>
-                  <Td right>{p.available && p.week_return != null ? pp(s.target_return - p.week_return) : '—'}</Td>
-                  <Td right>{p.available ? `${p.same_dir_days}/${r.week.trading_days}일` : '—'}</Td>
-                  <Td right>{p.corr_60d != null ? p.corr_60d.toFixed(2) : '—'}</Td>
+                  <Td>{p.name}</Td>
+                  <Td right>{p.available ? pct(p.week_return) : '시세 없음'}</Td>
+                  <Td right>{p.available && p.week_return != null ? pp(p.week_return - s.target_return) : '—'}</Td>
+                  <Td right>{p.available ? `${r.week.trading_days}일 중 ${p.same_dir_days}일` : '—'}</Td>
                 </tr>
               ))}
             </tbody>
           </table>
         </Fig>
-        <H no="6.">이번 주 공시·보도</H>
+        <H no="7.">이번 주 공시·보도</H>
         {events.length ? (
-          <Fig title="표 4. 고객사·비교기업 공시와 보도" source={r.news_enabled ? 'OpenDART, 언론 보도(Claude 웹검색, 링크 확인)' : 'OpenDART (뉴스 검색 제외)'} note="* 보도일 추정">
+          <Fig title="표 5. 고객사·비교기업 공시와 보도" source={r.news_enabled ? 'OpenDART, 언론 보도' : 'OpenDART'} note={events.some((e) => e.estimated) ? '* 보도일 추정' : undefined}>
             <table className="w-full text-[9.5px]">
               <thead><tr><Th>일자</Th><Th>기업</Th><Th>구분</Th><Th>내용</Th></tr></thead>
               <tbody>{events.map((x, i) => (
-                <tr key={i} className="align-top"><Td className="whitespace-nowrap">{x.date.slice(5)}{x.kind === '보도' && 'date_certain' in x && !x.date_certain ? '*' : ''}</Td>
+                <tr key={i} className="align-top"><Td className="whitespace-nowrap">{md(x.date)}{x.estimated ? '*' : ''}</Td>
                   <Td className="whitespace-nowrap">{x.company}</Td><Td>{x.kind}</Td><Td>{x.title}{x.extra && <span className="text-slate-500"> ({x.extra})</span>}</Td></tr>
               ))}</tbody>
             </table>
           </Fig>
-        ) : <p className="text-slate-500">해당 주 공시·보도가 없습니다.</p>}
-        <H no="7.">다음 주 확인할 점</H>
-        <Body rep={rep} keyName="watch" />
+        ) : <p className="text-slate-500">이번 주 고객사·비교기업 공시와 보도는 없었다.</p>}
+        <H no="8.">다음 주 체크포인트</H>
+        <Checkpoints rep={rep} />
 
-        <div className="pr-keep mt-5 rounded border border-slate-300 p-2 text-[8.5px] leading-relaxed text-slate-600">
-          <b>분석 방법</b> — 기대수익률 = α + β시장({r.model.beta_market.toFixed(2)}) × {r.model.market_label} + β산업({(r.model.beta_industry ?? 0).toFixed(2)}) × 비교군 가중평균 중 시장으로 설명되지 않는 부분.
-          해당 주 이전 {r.model.n}거래일({r.model.period.join('~')})로 추정(R² {r.model.r2.toFixed(2)}, 일별 잔차 표준편차 {(r.model.sigma_daily * 100).toFixed(2)}%) — 해당 주 데이터는 모형에 사용하지 않음.
-          개별 요인 = 실제 − 기대. 일별 |z| ≥ {r.thresholds.z_day} 이상 변동일, 주간 |z| ≥ {r.thresholds.z_week} 개별 요인 우세, 그 외 비교군과 방향이 같으면 동조(폭 차이 5%p 이상은 함께 표시).
-        </div>
-        <div className="pr-keep mt-3 border-t border-slate-300 pt-2 text-[8.5px] leading-relaxed text-slate-500">
-          본 보고서는 KRX 시세·OpenDART 공시와 언론 보도(보조 근거)를 바탕으로 ValueScope가 산출한 주가 동향 분석이며, 투자 권유나 매매 추천이 아닙니다.
-          공시·보도와 주가 변동의 시간적 근접은 인과관계를 뜻하지 않습니다. 시장지수는 KRX 일별매매정보 기반 시가총액가중 대용치(공식 지수 아님)입니다.
-          {rep && <> 해석: {rep.status === 'generated' ? `AI ${rep.model ?? ''}` : '규칙 기반'} · {rep.verification}{rep.held.length ? ` · 검증 미통과 ${rep.held.length}개 문단 제외` : ''}.</>}
+        <div className="pr-keep mt-6 border-t border-slate-300 pt-2 text-[8.5px] leading-relaxed text-slate-500">
+          본 자료는 정보 제공 목적이며 투자 권유가 아닙니다. 공시·보도와 주가 변동의 시점이 겹치더라도 인과관계를 뜻하지는 않습니다.
         </div>
       </section>
     </div>

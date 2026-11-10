@@ -66,6 +66,11 @@ def test_weekly_detects_idiosyncratic_shock(client, db):
     assert s["abnormal_days"] == ["2026-10-28"]
     wed = next(d for d in w.result["days"] if d["date"] == "2026-10-28")
     assert wed["abnormal"] and wed["z"] > 2.5 and wed["explanation"].startswith("확인된 공시·보도 없음")
+    ctx = w.result["context"]
+    assert ctx["target_pre"] is not None and ctx["peer_pre"] is not None and ctx["target_5w"] is not None
+    assert "2026-10-28" in ctx["diverged_days"] and wed["diverged"]
+    assert {p["name"] for p in ctx["peers"]}   # 비교기업별 직전 4주·이번 주·5주 누적
+    assert any(s["key"] == "drivers" and s["title"] == "비교기업 대비 강세 배경" for s in w.report["sections"])
 
 
 def test_weekly_links_news_to_days(client, db, monkeypatch):
@@ -102,3 +107,61 @@ def test_weekly_api_flow(client, db, monkeypatch):
     # (today 고정이 아니므로 실행 결과 자체는 다른 테스트에서 검증) — 목록/조회 형식만 확인
     lst = client.get(f"/api/projects/{pid}/weekly").json()
     assert lst == []
+
+
+def test_weekly_commentary_rejects_statistical_jargon():
+    from app.services.ai import AIProvider, AIResult
+    from app.services.weekly_run import build_evidence, write_report
+
+    res = {"week": {"start": "2026-11-02", "end": "2026-11-08", "trading_days": 5, "base_date": "2026-10-30", "base_close": 80000.0, "last_close": 63000.0},
+           "summary": {"target_return": -0.212, "peer_return": -0.104, "market_return": -0.11, "excess_vs_peers": -0.108, "excess_vs_market": -0.102,
+                       "residual_sum": -0.115, "z_week": -1.19, "pattern": "comove", "pattern_label": "비교기업과 동반 하락 (비교기업보다 10.8%p 약세)",
+                       "same_dir_days": 3, "judged_days": 5, "abnormal_days": [], "volatility_flags": [], "volatility_label": "변동성 평소 수준"},
+           "days": [], "peers": [], "volatility": {}, "model": {"market_label": "KOSDAQ 시가총액가중 대용지수"}}
+    ev = build_evidence("선익시스템", res, [], [])
+    ok_id = res["summary"]["eids"]["target"]
+
+    class FakeAI(AIProvider):
+        name = "fake"
+
+        def complete_json(self, system, prompt, schema):
+            assert "z값" in system and "평서형" in system   # 리포트 문체·용어 금지 지침 전달
+            return AIResult(data={"headline": "선익시스템은 -21.2%로 개별 요인 합계 -11.5%(z=-1.19)였다.",
+                                  "sections": [{"key": "overview", "paragraphs": [
+                                      {"text": "선익시스템 주가는 이번 주 -21.2% 내렸다.", "evidence_ids": [ok_id]},
+                                      {"text": "개별 요인 합계는 통계적으로 유의하지 않았다.", "evidence_ids": [ok_id]}]}]},
+                            provider="fake", model="f")
+
+    rep = write_report(FakeAI(), "선익시스템", res, ev)
+    paras = rep["sections"][0]["paragraphs"]
+    assert paras[0]["text"] == "선익시스템 주가는 이번 주 -21.2% 내렸다."
+    assert [p["text"] for p in paras[1:]] == ["이번 주 회사 관련 공시나 언론 보도는 없었습니다."]   # 요약에 이슈 유무가 빠지면 자동 보충
+    assert rep["held"] and "통계 용어" in rep["held"][0]["issues"][0]
+    assert "z=" not in rep["headline"] and "개별 요인" not in rep["headline"]   # 규칙 기반 헤드라인으로 대체
+
+
+def test_hedging_sentences_are_removed_and_overview_states_issue_status():
+    from app.services.ai import NoAIProvider
+    from app.services.weekly_run import build_evidence, strip_hedges, write_report
+
+    t = "11월 3일(화) 기재정정 공시가 있었다. 같은 날 주가는 -9.4% 내렸다. 다만 정정 내용과 주가 반응의 관계는 확인된 자료만으로 단정하기 어렵다."
+    assert strip_hedges(t) == "11월 3일(화) 기재정정 공시가 있었다. 같은 날 주가는 -9.4% 내렸다."
+    assert strip_hedges("인과관계는 확인되지 않는다.") == ""
+
+    res = {"week": {"start": "2026-11-02", "end": "2026-11-08", "trading_days": 5, "base_date": "2026-10-30", "base_close": None, "last_close": None},
+           "summary": {"target_return": -0.2, "peer_return": -0.1, "market_return": -0.1, "excess_vs_peers": -0.1, "excess_vs_market": -0.1,
+                       "pattern": "comove", "pattern_label": "비교기업과 동반 하락", "same_dir_days": 3, "judged_days": 5,
+                       "abnormal_days": [], "volatility_flags": [], "volatility_label": "변동성 평소 수준"},
+           "days": [], "peers": [], "volatility": {}, "model": {"market_label": "KOSDAQ 시가총액가중 대용지수"}}
+    ev = build_evidence("T", res, [], [], target_id=1)
+    rep = write_report(NoAIProvider(), "T", res, ev)   # 규칙 기반
+    overview = next(s for s in rep["sections"] if s["key"] == "overview")
+    assert any("공시나 언론 보도는 없었습니다" in p["text"] for p in overview["paragraphs"])
+
+    discs = [{"date": "2026-11-03", "company_id": 1, "company": "T", "title": "[기재정정]단일판매ㆍ공급계약체결", "url": "u", "rcept_no": "1"},
+             {"date": "2026-11-05", "company_id": 2, "company": "P", "title": "잠정실적", "url": "u2", "rcept_no": "2"}]
+    ev2 = build_evidence("T", res, discs, [], target_id=1)
+    assert res["target_issues"]["disclosures"] == [{"date": "2026-11-03", "title": "[기재정정]단일판매ㆍ공급계약체결"}]  # 비교기업 공시는 제외
+    rep2 = write_report(NoAIProvider(), "T", res, ev2)
+    ov2 = next(s for s in rep2["sections"] if s["key"] == "overview")
+    assert any("11월 3일 '단일판매·공급계약 체결(정정)' 공시가 있었고" in p["text"] for p in ov2["paragraphs"])

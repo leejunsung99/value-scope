@@ -36,7 +36,9 @@ Z_WEEK = 2.0
 VOL_RATIO = 1.5
 RANGE_RATIO = 1.5
 VOLUME_RATIO = 2.0
-GAP_NOTE = 0.05        # 동조 판정이어도 비교군과 주간 수익률 차이가 5%p 이상이면 라벨에 표시
+GAP_NOTE = 0.05
+DIVERGE_GAP = 0.03     # 하루 수익률이 비교기업 평균과 3%p 이상 차이 나거나 방향이 반대면 '차이가 벌어진 날'
+PRE_DAYS = 28          # 직전 비교 구간(약 4주)        # 동조 판정이어도 비교군과 주간 수익률 차이가 5%p 이상이면 라벨에 표시
 USE_W = {"valuation": 1.0, "industry_reference": 0.5}
 WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]
 
@@ -237,16 +239,46 @@ def compute(db: Session, target: Company, peers: list[PeerInfo], mon: date, sun:
     # ---- 3) 주간 판정
     if z_week is not None and abs(z_week) >= Z_WEEK:
         pattern = "idiosyncratic"
-        label = f"개별 요인 우세 ({'상승' if resid_sum > 0 else '하락'})"
+        label = f"회사 고유 요인으로 {'상승' if resid_sum > 0 else '하락'}"
     elif p_week is not None and t_week * p_week > 0:
         pattern = "comove"
         gap = t_week - p_week
         # 방향은 같지만 폭 차이가 크면(통계적으로 유의하지 않더라도) 함께 표시
-        gap_txt = f", 비교군 대비 {gap * 100:+.1f}%p {'초과' if gap > 0 else '부진'}" if abs(gap) >= GAP_NOTE else ""
-        label = f"비교군 동조 ({'동반 상승' if t_week > 0 else '동반 하락'}{gap_txt})"
+        gap_txt = f" (비교기업보다 {abs(gap) * 100:.1f}%p {'강세' if gap > 0 else '약세'})" if abs(gap) >= GAP_NOTE else ""
+        label = f"비교기업과 동반 {'상승' if t_week > 0 else '하락'}{gap_txt}"
     else:
         pattern = "mixed"
-        label = "혼조 (비교군과 방향 다름, 개별 요인은 통계적으로 약함)"
+        label = "비교기업과 엇갈린 흐름"
+
+    # ---- 6) 약세·강세 배경: 직전 4주 흐름과 차이가 벌어진 날
+    for d in days:
+        d["diverged"] = bool(d["same_dir"] is False or (d["peer_avg"] is not None and abs(d["ret"] - d["peer_avg"]) >= DIVERGE_GAP))
+    pre_lo = prev_day - pd.Timedelta(days=PRE_DAYS)
+
+    def window(series: pd.Series) -> float | None:
+        w_ = series[(series.index > pre_lo) & (series.index <= prev_day)].dropna()
+        return compound(w_) if len(w_) >= 5 else None
+
+    pre_peers = []
+    for p in peers:
+        c = p.company.stock_code
+        if c in rets:
+            pr_ = window(_daily_only(rets[c]))
+            wk_ = next((x["week_return"] for x in peer_rows if x["company_id"] == p.company.id and x.get("available")), None)
+            if pr_ is not None:
+                pre_peers.append({"company_id": p.company.id, "name": p.company.name, "pre_4w": pr_, "week": wk_,
+                                  "five_week": (1 + pr_) * (1 + wk_) - 1 if wk_ is not None else None})
+    t_pre, p_pre, m_pre = window(t_ret), window(peer_avg) if not peer_avg.empty else None, window(m_ret)
+    context = {
+        "pre_start": str((t_ret[(t_ret.index > pre_lo)].index.min()).date()) if (t_ret.index > pre_lo).any() else None,
+        "pre_end": str(prev_day.date()),
+        "target_pre": t_pre, "peer_pre": p_pre, "market_pre": m_pre,
+        "target_5w": (1 + t_pre) * (1 + t_week) - 1 if t_pre is not None else None,
+        "peer_5w": (1 + p_pre) * (1 + p_week) - 1 if p_pre is not None and p_week is not None else None,
+        "market_5w": (1 + m_pre) * (1 + m_week) - 1 if m_pre is not None else None,
+        "peers": pre_peers,
+        "diverged_days": [d["date"] for d in days if d["diverged"]],
+    }
 
     # 지수화 차트용: 직전 거래일 = 100
     def path(series: pd.Series) -> list[list]:
@@ -272,8 +304,8 @@ def compute(db: Session, target: Company, peers: list[PeerInfo], mon: date, sun:
                     "residual_sum": resid_sum, "z_week": z_week, "pattern": pattern, "pattern_label": label,
                     "same_dir_days": same_days, "judged_days": judged_days,
                     "abnormal_days": [d["date"] for d in days if d["abnormal"]],
-                    "volatility_flags": vol_flags, "volatility_label": "변동성 확대" if vol_flags else "평상 수준"},
-        "days": days, "peers": peer_rows, "volatility": vol, "model": model, "chart": chart,
+                    "volatility_flags": vol_flags, "volatility_label": "변동성 확대" if vol_flags else "변동성 평소 수준"},
+        "days": days, "peers": peer_rows, "volatility": vol, "model": model, "chart": chart, "context": context,
         "thresholds": {"z_day": Z_DAY, "z_week": Z_WEEK, "vol_ratio": VOL_RATIO, "range_ratio": RANGE_RATIO, "volume_ratio": VOLUME_RATIO},
     }
 
@@ -301,3 +333,43 @@ def attach_events(result: dict, target_id: int, disclosures: list[dict], news_ev
         if d["abnormal"]:
             d["explanation"] = ("공시와 시간적 근접" if d["disclosures"] else "언론 보도와 시간적 근접" if d["news"]
                                 else "확인된 공시·보도 없음") + " (인과관계 미확정)"
+
+
+def prior_disclosures(db: Session, target: Company, mon: date) -> list[dict]:
+    """직전 4주(해당 주 시작 전) 고객사 공시 — 이번 주 흐름의 배경 점검용. IR 개최 공지는 제외."""
+    lo, hi = (mon - timedelta(days=PRE_DAYS)).strftime("%Y%m%d"), (mon - timedelta(days=1)).strftime("%Y%m%d")
+    out = []
+    for d in db.scalars(select(Disclosure).where(Disclosure.company_id == target.id, Disclosure.rcept_dt >= lo, Disclosure.rcept_dt <= hi)
+                        .order_by(Disclosure.rcept_dt)):
+        if "기업설명회" in d.report_nm:
+            continue
+        out.append({"date": f"{d.rcept_dt[:4]}-{d.rcept_dt[4:6]}-{d.rcept_dt[6:]}", "title": d.report_nm.strip(), "url": d.url})
+    return out
+
+
+def quick_gap(db: Session, target: Company, peers: list[PeerInfo], mon: date, sun: date) -> float | None:
+    """뉴스 검색 전 미리 보는 '고객사 − 비교기업 평균' 주간 수익률 차이(종가 단순 계산, 가중치 반영)."""
+    codes = [target.stock_code] + [p.company.stock_code for p in peers]
+    lo = (mon - timedelta(days=10)).strftime("%Y%m%d")
+    rows = db.execute(select(StockPrice.stock_code, StockPrice.trade_date, StockPrice.close)
+                      .where(StockPrice.stock_code.in_(codes), StockPrice.trade_date >= lo, StockPrice.trade_date <= sun.strftime("%Y%m%d"))).all()
+    by: dict[str, dict[str, float]] = {}
+    for c, d, px in rows:
+        if px:
+            by.setdefault(c, {})[d] = px
+    ms = mon.strftime("%Y%m%d")
+
+    def wret(c):
+        s_ = by.get(c) or {}
+        before = [d for d in s_ if d < ms]
+        during = [d for d in s_ if d >= ms]
+        if not before or not during:
+            return None
+        return s_[max(during)] / s_[max(before)] - 1
+
+    t = wret(target.stock_code)
+    pr = [(wret(p.company.stock_code), p.weight) for p in peers]
+    pr = [(r, w) for r, w in pr if r is not None]
+    if t is None or not pr:
+        return None
+    return t - sum(r * w for r, w in pr) / sum(w for _, w in pr)

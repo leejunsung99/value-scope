@@ -7,6 +7,7 @@ import { addDays, isoWeekOf, mondayOf, mondayOfIsoWeek, toISO, weeklyApi, type W
 import { WeeklyDailyChart, WeeklyPathChart } from '../charts'
 import { Badge, Button, Card, Empty, Notice, Spinner, fmtDateTime } from '../ui'
 import { useProject } from './ProjectLayout'
+import { splitCheckpoints } from './WeeklyReport'
 
 const pct = (v: number | null | undefined, d = 1) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(d)}%`)
 const PATTERN_TONE: Record<string, 'green' | 'red' | 'amber' | 'blue' | 'slate'> = { comove: 'blue', idiosyncratic: 'red', mixed: 'amber' }
@@ -123,7 +124,11 @@ function WeeklyView({ run }: { run: WeeklyRun }) {
             {rep.sections.filter((sec) => sec.paragraphs.length).map((sec) => (
               <div key={sec.key}>
                 <div className="mb-1 text-xs font-semibold text-slate-600 dark:text-slate-300">{sec.title}</div>
-                {sec.paragraphs.map((p) => (
+                {sec.key === 'watch' ? (
+                  <ol className="list-decimal space-y-1.5 pl-5 text-sm leading-relaxed">
+                    {splitCheckpoints(sec.paragraphs.map((p) => p.text)).map((t, i) => <li key={i}>{t}</li>)}
+                  </ol>
+                ) : sec.paragraphs.map((p) => (
                   <p key={p.ref} className="mb-1 text-sm leading-relaxed">{p.text} <span className="text-[10px] text-slate-400">[{p.evidence_ids.join(', ')}]</span></p>
                 ))}
               </div>
@@ -135,6 +140,26 @@ function WeeklyView({ run }: { run: WeeklyRun }) {
               {rep.held.map((h) => <div key={h.ref} className="mt-1 border-l-2 border-amber-300 pl-2"><span className="line-through">{h.text}</span> — {h.issues.join(' / ')}</div>)}
             </details>
           )}
+        </Section>
+      )}
+
+      {r.context?.target_pre != null && (
+        <Section title={rep?.sections.find((x) => x.key === 'drivers')?.title ?? '비교기업 대비 흐름의 배경'}>
+          <table className="tabular w-full text-xs">
+            <thead className="text-left text-[11px] text-slate-500"><tr><th className="py-1">구분</th><th className="text-right">직전 4주</th><th className="text-right">이번 주</th><th className="text-right">5주 누적</th></tr></thead>
+            <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+              <tr className="bg-blue-50/60 font-semibold dark:bg-blue-950/30"><td className="py-1">{project.company.name}</td><td className="text-right">{pct(r.context.target_pre)}</td><td className="text-right">{pct(s.target_return)}</td><td className="text-right">{pct(r.context.target_5w)}</td></tr>
+              <tr className="font-semibold"><td className="py-1">비교기업 평균</td><td className="text-right">{pct(r.context.peer_pre)}</td><td className="text-right">{pct(s.peer_return)}</td><td className="text-right">{pct(r.context.peer_5w)}</td></tr>
+              <tr><td className="py-1">시장</td><td className="text-right">{pct(r.context.market_pre)}</td><td className="text-right">{pct(s.market_return)}</td><td className="text-right">{pct(r.context.market_5w)}</td></tr>
+              {[...r.context.peers].sort((a, b) => b.pre_4w - a.pre_4w).map((p) => (
+                <tr key={p.company_id} className="text-slate-600 dark:text-slate-400"><td className="py-1 pl-3">{p.name}</td><td className="text-right">{pct(p.pre_4w)}</td><td className="text-right">{pct(p.week)}</td><td className="text-right">{pct(p.five_week)}</td></tr>
+              ))}
+            </tbody>
+          </table>
+          <div className="mt-1 text-[11px] text-slate-500">
+            직전 4주 = {r.context.pre_start} ~ {r.context.pre_end}. 차이가 벌어진 날: {r.context.diverged_days.length ? r.context.diverged_days.map((d) => d.slice(5)).join(', ') : '없음'}.
+            {!!r.prior_disclosures?.length && <> 직전 4주 회사 공시: {r.prior_disclosures.map((x) => `${x.date.slice(5)} ${x.title}`).join(' · ')}</>}
+          </div>
         </Section>
       )}
 

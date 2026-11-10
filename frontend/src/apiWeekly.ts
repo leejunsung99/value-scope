@@ -24,7 +24,7 @@ export interface WeeklyDay {
   residual: number; z: number | null; abnormal: boolean; same_dir: boolean | null; range?: number | null; volume_ratio?: number | null; close?: number
   disclosures?: { date: string; title: string; url: string; company: string }[]
   news?: { event: string; date: string; url: string; outlets: string[]; sentiment: string; verification?: string }[]
-  explanation?: string; eid?: string
+  explanation?: string; eid?: string; diverged?: boolean
 }
 export interface WeeklyPeer {
   company_id: number; name: string; available: boolean; weight: number; use_type?: string; category?: string
@@ -42,6 +42,12 @@ export interface WeeklyResult {
   disclosures: { date: string; company_id: number; company: string; title: string; url: string; rcept_no: string }[]
   news: { date: string; date_certain: boolean; company_id: number | null; company: string; event: string; url: string; outlets: string[]; articles: number; sentiment: string; verification?: string; summary?: string }[]
   news_enabled: boolean
+  context?: {
+    pre_start: string | null; pre_end: string; target_pre: number | null; peer_pre: number | null; market_pre: number | null
+    target_5w: number | null; peer_5w: number | null; market_5w: number | null; diverged_days: string[]
+    peers: { company_id: number; name: string; pre_4w: number; week: number | null; five_week: number | null }[]
+  }
+  prior_disclosures?: { date: string; title: string; url: string }[]
   peer_list: { company_id: number; name: string; weight: number }[]
 }
 export interface WeeklyReport {
