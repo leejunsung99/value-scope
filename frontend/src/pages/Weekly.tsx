@@ -7,7 +7,6 @@ import { addDays, isoWeekOf, mondayOf, mondayOfIsoWeek, toISO, weeklyApi, type W
 import { WeeklyDailyChart, WeeklyPathChart } from '../charts'
 import { Badge, Button, Card, Empty, Notice, Spinner, fmtDateTime } from '../ui'
 import { useProject } from './ProjectLayout'
-import { splitCheckpoints } from './WeeklyReport'
 
 const pct = (v: number | null | undefined, d = 1) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(d)}%`)
 const PATTERN_TONE: Record<string, 'green' | 'red' | 'amber' | 'blue' | 'slate'> = { comove: 'blue', idiosyncratic: 'red', mixed: 'amber' }
@@ -121,14 +120,11 @@ function WeeklyView({ run }: { run: WeeklyRun }) {
       {rep && (
         <Section title="주간 해석" right={<span className="text-[11px] text-slate-500">{rep.status === 'generated' ? `AI ${rep.model ?? ''}` : '규칙 기반'} · {rep.verification}</span>}>
           <div className="space-y-3">
-            {rep.sections.filter((sec) => sec.paragraphs.length).map((sec) => (
+            {/* '다음 주 체크포인트(watch)'는 더 이상 싣지 않는다 — 예전에 만든 리포트에 남아 있어도 숨긴다 */}
+            {rep.sections.filter((sec) => sec.paragraphs.length && sec.key !== 'watch').map((sec) => (
               <div key={sec.key}>
                 <div className="mb-1 text-xs font-semibold text-slate-600 dark:text-slate-300">{sec.title}</div>
-                {sec.key === 'watch' ? (
-                  <ol className="list-decimal space-y-1.5 pl-5 text-sm leading-relaxed">
-                    {splitCheckpoints(sec.paragraphs.map((p) => p.text)).map((t, i) => <li key={i}>{t}</li>)}
-                  </ol>
-                ) : sec.paragraphs.map((p) => (
+                {sec.paragraphs.map((p) => (
                   <p key={p.ref} className="mb-1 text-sm leading-relaxed">{p.text} <span className="text-[10px] text-slate-400">[{p.evidence_ids.join(', ')}]</span></p>
                 ))}
               </div>

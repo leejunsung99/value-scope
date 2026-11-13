@@ -2,7 +2,7 @@
 // 통계·모형 용어(z값, 기대수익률, 개별 요인 등)와 분석 방법 설명은 싣지 않는다(화면에서만 확인).
 //  1쪽: 이번 주 흐름(판정·핵심 수치) + 주가 경로 + 주간 요약 + 비교기업과의 동조
 //  2쪽: 회사 고유 이슈 + 일별 등락률 비교 + 일별 주요 공시·보도 + 변동성·거래량
-//  3쪽: 비교기업별 움직임 + 이번 주 공시·보도 + 다음 주 체크포인트
+//  3쪽: 비교기업별 움직임 + 이번 주 공시·보도
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, type ReactNode } from 'react'
 import { useParams, useSearchParams } from 'react-router-dom'
@@ -36,31 +36,6 @@ function Body({ rep, keyName }: { rep?: Rep; keyName: string }) {
   const sec = rep?.sections.find((s) => s.key === keyName)
   if (!sec?.paragraphs.length) return null
   return <div className="space-y-1.5">{sec.paragraphs.map((p) => <p key={p.ref} className="text-justify text-[10.5px] leading-[1.8]">{p.text}</p>)}</div>
-}
-
-/** '첫째, … 둘째, …'로 이어 쓴 문장도 항목별로 나눈다. */
-export function splitCheckpoints(texts: string[]): string[] {
-  return texts
-    .flatMap((t) => t.split(/\s*(?:첫째|둘째|셋째|넷째|다섯째|마지막으로)\s*,?\s*/))
-    .map((t) => t.trim())
-    .filter(Boolean)
-}
-
-/** 다음 주 체크포인트: 번호 목록으로 한 줄씩 띄워서 */
-function Checkpoints({ rep }: { rep?: Rep }) {
-  const sec = rep?.sections.find((s) => s.key === 'watch')
-  const items = splitCheckpoints((sec?.paragraphs ?? []).map((p) => p.text))
-  if (!items.length) return null
-  return (
-    <ol className="space-y-2.5">
-      {items.map((t, i) => (
-        <li key={i} className="flex gap-2.5 text-[10.5px] leading-[1.75]">
-          <span className="mt-[1px] flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full bg-violet-800 text-[9.5px] font-bold text-white">{i + 1}</span>
-          <span className="text-justify">{t}</span>
-        </li>
-      ))}
-    </ol>
-  )
 }
 
 export default function WeeklyReport() {
@@ -248,8 +223,6 @@ export default function WeeklyReport() {
             </table>
           </Fig>
         ) : <p className="text-slate-500">이번 주 고객사·비교기업 공시와 보도는 없었다.</p>}
-        <H no="8.">다음 주 체크포인트</H>
-        <Checkpoints rep={rep} />
 
         <div className="pr-keep mt-6 border-t border-slate-300 pt-2 text-[8.5px] leading-relaxed text-slate-500">
           본 자료는 정보 제공 목적이며 투자 권유가 아닙니다. 공시·보도와 주가 변동의 시점이 겹치더라도 인과관계를 뜻하지는 않습니다.

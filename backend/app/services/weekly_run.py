@@ -23,7 +23,7 @@ from app.services.report import INVEST_ADVICE, check_numbers, known_values
 log = logging.getLogger(__name__)
 
 SECTIONS = [("overview", "주간 요약"), ("comovement", "비교기업과의 동조"), ("drivers", "비교기업 대비 흐름의 배경"),
-            ("idiosyncratic", "회사 고유 이슈"), ("volatility", "변동성·거래량"), ("watch", "다음 주 체크포인트")]
+            ("idiosyncratic", "회사 고유 이슈"), ("volatility", "변동성·거래량")]
 
 
 def drivers_title(res: dict) -> str:
@@ -63,7 +63,6 @@ WRITER_SYSTEM = """당신은 증권사 리서치센터의 주간 주가 동향 �
 - 보도(kind=news)는 '~라고 보도됐다'로 쓰고, 공시로 확인된 경우만 사실로 쓰십시오.
 - 주간 요약(overview)에는 주가 흐름과 함께, 이번 주 회사 관련 공시·보도(target_issues)가 있었는지를 반드시 쓰십시오.
   있으면 날짜와 제목을 짧게 쓰고, 없으면 '이번 주 회사 관련 공시나 보도는 없었다'고 쓰십시오.
-- 다음 주 체크포인트(watch)는 항목 하나를 문단 하나로 쓰고(2~4개), '첫째·둘째' 같은 번호는 붙이지 마십시오.
 - 비교기업 대비 흐름의 배경(drivers)에는 고객사가 비교기업·시장보다 더 내리거나(오르거나) 다르게 움직인 이유를 근거로 설명하십시오.
   다음 근거를 순서대로 검토해, 근거가 있는 것만 쓰십시오(2~3개 문단):
   ① 직전 4주 흐름(context): 직전 4주 동안 고객사와 비교기업의 수익률 차이 — 예: 비교기업이 먼저 크게 내릴 때 고객사는 버텼다면 이번 주 하락은 그 격차가 좁혀진 흐름으로 설명. 5주 누적 수익률도 함께 비교.
@@ -234,7 +233,6 @@ def rule_based(target_name: str, res: dict) -> dict:
                                f"5주 누적으로는 {target_name} {pct(res['context'].get('target_5w'))}, 비교기업 평균 {pct(res['context'].get('peer_5w'))}이다."),
                       "evidence_ids": [ids["context"]] + ([ids["context_5w"]] if ids.get("context_5w") else [])}]
                     if ids.get("context") else []),
-        "watch": [],
     }
     return {"headline": f"{target_name} 주간 {pct(s['target_return'])} — {s['pattern_label']}",
             "sections": [{"key": k, "paragraphs": v} for k, v in paras.items()]}
