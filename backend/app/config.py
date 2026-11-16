@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     ai_model: str = Field(default="claude-opus-5-5", alias="AI_MODEL")
     # Claude CLI takes model aliases (opus / sonnet / haiku) rather than API model IDs.
     claude_cli_model: str = Field(default="opus", alias="CLAUDE_CLI_MODEL")
+    # AI_PROVIDER=claude_cli: Codex CLI takes over when Claude CLI fails. Blank = Codex default model.
+    codex_cli_model: str = Field(default="", alias="CODEX_CLI_MODEL")
     # Read-only access to the separate dart-market-monitor database (shared raw source).
     dart_monitor_database_url: str = Field(default="", alias="DART_MONITOR_DATABASE_URL")
     # The API keys are shared with dart-market-monitor; cap ValueScope's own usage per day.

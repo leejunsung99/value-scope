@@ -8,18 +8,23 @@ validated against a schema by the caller.
 Providers
 - anthropic : Claude via the official Anthropic SDK (AI_API_KEY). Recommended for unattended use.
 - claude_cli: the locally installed `claude` CLI in headless mode (`claude -p`). Uses the
-              CLI's own login; check that your plan's terms allow this use.
+              CLI's own login; check that your plan's terms allow this use. When Claude fails,
+              the same request goes to the `codex` CLI (`codex exec`, its own login).
 - none      : no LLM. Callers fall back to rule-based behaviour and say so.
 """
 from __future__ import annotations
 
 import json
+import logging
+import os
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 
 from app.config import Settings
+
+log = logging.getLogger(__name__)
 
 
 class AIUnavailable(Exception):
@@ -165,13 +170,90 @@ class ClaudeCLIProvider(AIProvider):
         return AIResult(data=data, provider=self.name, model=", ".join(used))
 
 
+class CodexCLIProvider(AIProvider):
+    """Headless `codex exec` (the CLI's own login): read-only sandbox, web search off, an empty
+    temporary working directory, no session file. The schema goes into the prompt (not
+    --output-schema, which needs a strict schema) and the caller validates the JSON as usual."""
+
+    name = "codex_cli"
+
+    def __init__(self, model: str = "", timeout: int = 900):
+        exe = shutil.which("codex")
+        if not exe:
+            raise AIUnavailable("codex CLI를 찾을 수 없습니다. Codex CLI 설치 및 로그인(`codex login`)을 확인하세요.")
+        self.exe = exe
+        self.model = model
+        self.timeout = timeout
+
+    def build_command(self, cwd: str, out_path: str) -> list[str]:
+        cmd = [self.exe, "exec", "--skip-git-repo-check", "--ephemeral", "-s", "read-only", "-C", cwd,
+               "-c", 'web_search="disabled"', "-o", out_path]
+        if self.model:
+            cmd += ["-m", self.model]
+        return cmd + ["-"]
+
+    def complete_json(self, system: str, prompt: str, schema: dict) -> AIResult:
+        full = (
+            f"{system}\n\n파일을 읽거나 명령을 실행하지 말고 아래 내용만으로 답하라.\n\n{prompt}\n\n"
+            "Respond with ONLY a JSON object (no markdown fences) matching this JSON schema:\n"
+            f"{json.dumps(schema, ensure_ascii=False)}"
+        )
+        with tempfile.TemporaryDirectory(prefix="valuescope-codex-") as cwd:
+            out_path = os.path.join(cwd, "answer.txt")
+            try:
+                proc = subprocess.run(self.build_command(cwd, out_path), input=full, capture_output=True, text=True,
+                                      encoding="utf-8", errors="replace", timeout=self.timeout, cwd=cwd)
+            except subprocess.TimeoutExpired as e:
+                raise AIError("codex CLI 응답 시간 초과") from e
+            if proc.returncode != 0:
+                rows = [r.strip() for r in (proc.stderr or proc.stdout or "").splitlines() if r.strip()]
+                raise AIError(f"codex CLI 실행 실패 (exit {proc.returncode}): {' / '.join(rows[-3:])[:200]}")
+            text = open(out_path, encoding="utf-8").read().strip() if os.path.exists(out_path) else ""
+        try:
+            data = json.loads(text[text.find("{"): text.rfind("}") + 1])
+        except (json.JSONDecodeError, ValueError) as e:
+            raise AIError("codex CLI 응답 JSON 파싱 실패") from e
+        return AIResult(data=data, provider=self.name, model=self.model or "codex 기본 모델")
+
+
+class FallbackProvider(AIProvider):
+    """Providers in order (Claude CLI, then Codex CLI): the first answer wins.
+    AIResult.provider says which one actually answered."""
+
+    def __init__(self, providers: list[AIProvider]):
+        self.providers = providers
+        self.name = providers[0].name
+        self.model = " → ".join(f"{p.name}:{p.model or '기본'}" for p in providers)
+
+    def complete_json(self, system: str, prompt: str, schema: dict) -> AIResult:
+        errors = []
+        for p in self.providers:
+            try:
+                return p.complete_json(system, prompt, schema)
+            except (AIError, AIUnavailable) as e:
+                log.warning("%s 실패 → 다음 AI로 다시 시도: %s", p.name, e)
+                errors.append(f"{p.name}: {e}")
+        raise AIError(" / ".join(errors))
+
+
 def get_provider(settings: Settings) -> AIProvider:
     p = (settings.ai_provider or "none").lower()
     try:
         if p == "anthropic":
             return AnthropicProvider(settings.ai_api_key, settings.ai_model)
         if p == "claude_cli":
-            return ClaudeCLIProvider(settings.claude_cli_model)
+            # Claude CLI first; Codex CLI when Claude fails (login, usage limit, timeout, bad JSON).
+            chain: list[AIProvider] = []
+            reasons = []
+            for make in (lambda: ClaudeCLIProvider(settings.claude_cli_model),
+                         lambda: CodexCLIProvider(settings.codex_cli_model)):
+                try:
+                    chain.append(make())
+                except AIUnavailable as e:
+                    reasons.append(str(e))
+            if not chain:
+                raise AIUnavailable(" / ".join(reasons))
+            return chain[0] if len(chain) == 1 else FallbackProvider(chain)
     except AIUnavailable as e:
         return NoAIProvider(f"AI_PROVIDER={p} 사용 불가: {e}")
     return NoAIProvider()
