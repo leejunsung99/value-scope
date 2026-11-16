@@ -7,7 +7,7 @@ import re
 import traceback
 from datetime import date, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
@@ -343,10 +343,12 @@ def execute_weekly(session_factory: sessionmaker, wid: str, krx, dart, monitor, 
             raise wk.WeeklyError("아직 시작하지 않은 주는 분석할 수 없습니다.")
         _msg(db, w, "info", f"{target.name} 주간 주가 분석 {mon}~{sun} · 비교군 v{version.version_no} 상장 비교기업 {len(peers)}개")
 
-        # 1) 시세 최신화 (해당 주 거래일이 저장돼 있지 않을 때만)
-        have = db.scalar(select(PriceFetch.trade_date).where(PriceFetch.trade_date >= mon.strftime("%Y%m%d"),
-                                                            PriceFetch.trade_date <= sun.strftime("%Y%m%d")))
-        if krx is not None and (not have or sun >= today):
+        # 1) 시세 최신화 — 해당 주 마지막 평일(진행 중인 주는 오늘)까지 저장돼 있지 않으면 수집.
+        #    일부 요일만 저장된 주(예: 주중에 수집한 뒤 지난 주)를 그대로 쓰면 거래일이 빠진 채 분석된다.
+        latest = db.scalar(select(func.max(PriceFetch.trade_date)).where(
+            PriceFetch.trade_date >= mon.strftime("%Y%m%d"), PriceFetch.trade_date <= sun.strftime("%Y%m%d")))
+        last_weekday = min(mon + timedelta(days=4), today)
+        if krx is not None and (not latest or latest < last_weekday.strftime("%Y%m%d") or sun >= today):
             _stage(db, w, "주가 수집")
             krx.on_call = CallBudget(session_factory, "KRX", s.krx_daily_call_limit)
             try:
