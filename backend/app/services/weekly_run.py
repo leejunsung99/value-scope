@@ -90,7 +90,8 @@ WRITER_SYSTEM = """당신은 증권사 리서치센터의 주간 주가 동향 �
 - 주가 변동 요인 분석(causes): 이번 주 주가를 움직인 요인을 2~4개 문단으로 정리하십시오. 이 리포트의 핵심 섹션입니다.
   · 각 문단은 '요인 하나'(예: 업종 재료, 회사 고유 재료, 직전 흐름의 되돌림)를 다루고, 첫 문장에 그 요인을 한 줄로 밝히십시오.
   · 크게 움직인 날(일간 ±3% 이상 또는 이례적 변동일)마다 그날·그 직전 주말의 보도(news, 날짜 기준)를 대조해, 어떤 재료가 언제 반영됐는지 쓰십시오.
-  · 고객사 기사뿐 아니라 비교기업·관련 업종 기사(about이 비교기업인 news)도 활용해, 같은 재료로 함께 움직인 기업이 있으면 이름과 등락을 함께 쓰십시오.
+  · 고객사 기사뿐 아니라 비교기업 기사(role이 비교기업 그룹)와 관련 업종 기사(role='관련 기사', 업종 키워드 검색)도 활용해,
+    업종 전반의 재료인지 회사 고유 재료인지 가르고, 같은 재료로 함께 움직인 기업이 있으면 이름과 등락을 함께 쓰십시오.
   · 마지막 문단은 이번 주 흐름을 한 문장으로 종합하십시오(어떤 재료가 가장 크게 작용한 것으로 판단되는지).
   · 보도가 없으면 등락·업종 흐름·직전 흐름만으로 해석하되, 보도가 없었다는 사실을 한 번 밝히십시오.
   · 문단마다 등락일 근거 ID와 기사 근거 ID(news eid)를 함께 붙이십시오.
@@ -436,21 +437,34 @@ def execute_weekly(session_factory: sessionmaker, wid: str, krx, dart, monitor, 
         if w.options.get("include_news", True) and news_searcher is not None:
             _stage(db, w, "뉴스 검색(네이버 뉴스, 요청 간격 두고 순차 검색)")
             win = (mon.isoformat(), sun.isoformat())
-            # 고객사: 직전 주말 보도(월요일 주가에 반영)부터. 종목명 + '주가' 두 검색어, 최대 3쪽
-            specs = [news_svc.SearchSpec(
-                f"nv-week:{target.id}:{mon}", target.name,
+            # 고객사: 직전 주말 보도(월요일 주가에 반영)부터. 종목명 + '종목명 주가', 검색어당 첫 화면 + 다음 묶음 3번까지.
+            # 제목에 회사명이 없어도(예: 'OLED 투자 확대') 본문에 회사명이 있으면 남긴다.
+            target_spec = news_svc.SearchSpec(
+                f"nv2-week:{target.id}:{mon}", target.name,
                 f"'{target.name}'(종목코드 {target.stock_code}) 관련 뉴스를 웹검색으로 찾으십시오. 주가 변동 사유, 수주, 실적, 공시, 업황 포함.",
                 months=1, max_items=10, company_id=target.id, role="target",
                 window=((mon - timedelta(days=2)).isoformat(), sun.isoformat()),
-                terms=[target.name, f"{target.name} 주가"], mention=target.name, pages=3, per_term=20)]
-            # 비교기업(동종업계·장비·고객·소재): 기업당 1쪽, 기업명이 나오는 기사 최대 4건
+                terms=[target.name, f"{target.name} 주가"], mention=target.name, pages=4, per_term=40)
+            first = news_svc.run_searches(db, news_searcher, [target_spec], today, s.news_daily_search_limit)
+            specs = [target_spec]
+            # 비교기업(동종업계·장비·고객·소재): 기업당 첫 화면, 기업명이 나오는 증시·산업 기사 최대 4건
             if peers:
                 specs.append(news_svc.SearchSpec(
-                    f"nv-week-peers:{project.id}:{mon}", "비교기업",
+                    f"nv2-week-peers:{project.id}:{mon}", "비교기업",
                     f"다음 기업들의 주요 뉴스를 웹검색으로 찾으십시오: {', '.join(p.company.name for p in peers)}. about에는 기사 주 대상 기업명을 쓰십시오.",
                     months=1, max_items=10, role="peer", window=win,
                     terms=[p.company.name for p in peers], pages=1, per_term=4, context=news_svc.MARKET_CONTEXT))
-            nres = news_svc.run_searches(db, news_searcher, specs, today, s.news_daily_search_limit)
+            # 관련 업종: 고객사 기사에 자주 나온 산업 키워드(예: 'OLED 관련주')로 업종 기사 검색
+            themes = news_svc.theme_terms([(x.title, x.summary or "") for x in first.items.get(target_spec.query_key, [])], target.name)
+            if themes:
+                specs.append(news_svc.SearchSpec(
+                    f"nv2-week-theme:{project.id}:{mon}", f"관련 업종({', '.join(themes)})",
+                    f"{', '.join(themes)} 관련 국내 증시·산업 뉴스를 웹검색으로 찾으십시오.",
+                    months=1, max_items=10, role="theme", window=win,
+                    terms=themes, pages=2, per_term=8, must_mention=False, context=news_svc.MARKET_CONTEXT))
+            nres = news_svc.run_searches(db, news_searcher, specs[1:], today, s.news_daily_search_limit)
+            nres.outcomes = first.outcomes + nres.outcomes
+            nres.items.update(first.items)
             by_name = {c.name: c.id for c in companies}
             seen_urls: set[str] = set()
             for sp in specs:

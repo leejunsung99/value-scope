@@ -91,3 +91,31 @@ def test_market_flow_words_are_not_advice():
     assert invest_advice("반도체 장비주 전반으로 매수세가 확산됐다는 보도가 나왔다.") is None
     assert invest_advice("외국인 순매도가 이어졌다.") is None
     assert invest_advice("매수 의견을 유지한다.") is not None
+
+
+def test_more_pages_and_body_mention(monkeypatch):
+    """첫 화면 10건 다음 묶음(무한 스크롤)도 읽고, 제목·요약에 없고 본문에만 회사명이 있는 기사도 남긴다."""
+    monkeypatch.setitem(nw._naver_state, "last", 0.0)
+    monkeypatch.setitem(nw._naver_state, "blocked_until", 0.0)
+    first = _page(ITEMS[:1]).replace("</html>", '<script>new XLoad({ "url": "https:\/\/s.search.naver.com\/p\/more?x=1" });</script></html>')
+    more_item = [{"title": "OLED 투자 확대 기대", "url": "https://b.example/9", "content": "패널 업체 증설", "outlet": "C뉴스"}]
+    more = json.dumps({"collection": [{"html": _page(more_item)}], "url": ""})
+    art = '<html><meta property="article:published_time" content="2026-11-12T09:00:00+09:00"><p>장비주가 올랐다. 증착장비 업체 선익시스템도 수혜가 기대된다. 끝.</p></html>'
+
+    def handler(req):
+        if req.url.host == "search.naver.com":
+            return httpx.Response(200, text=first)
+        if req.url.host == "s.search.naver.com":
+            return httpx.Response(200, text=more)
+        return httpx.Response(200, text=art)
+
+    s = nw.NaverNewsSearcher(interval=(0, 0), client=httpx.Client(transport=httpx.MockTransport(handler)))
+    out = s.search(nw.SearchSpec("k", "x", "q", 1, 10, terms=["선익시스템"], pages=3), "2026-11-09", "2026-11-15")
+    assert [o["url"] for o in out] == ["https://a.example/1", "https://b.example/9"]
+    assert "선익시스템도 수혜가 기대된다" in out[1]["summary"]
+
+
+def test_theme_terms_from_company_articles():
+    arts = [("OLED 투자 확대 기대", "증착장비 수요"), ("OLED 수혜주", "선익시스템 증착장비"), ("마이크로 OLED", "증착장비 수주"),
+            ("ESG 등급", "AI 안경")]
+    assert nw.theme_terms(arts, "선익시스템") == ["OLED 관련주", "증착장비"]

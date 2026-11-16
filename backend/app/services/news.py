@@ -151,7 +151,7 @@ class NaverBlocked(RuntimeError):
     pass
 
 
-def _naver_get(client: httpx.Client, params: dict, interval: tuple[float, float]) -> str:
+def _naver_get(client: httpx.Client, params: dict | None, interval: tuple[float, float], url: str = NAVER_SEARCH) -> str:
     """네이버 요청은 프로세스 전체에서 한 번에 하나씩, 요청 사이에 무작위 간격을 둔다."""
     with _NAVER_LOCK:
         now = time.monotonic()
@@ -161,7 +161,7 @@ def _naver_get(client: httpx.Client, params: dict, interval: tuple[float, float]
         if wait > 0:
             time.sleep(wait)
         try:
-            r = client.get(NAVER_SEARCH, params=params, timeout=15)
+            r = client.get(url, params=params, timeout=15)
         finally:
             _naver_state["last"] = time.monotonic()
         if r.status_code in (403, 429, 503) or "자동입력 방지" in r.text[:20000]:
@@ -169,6 +169,27 @@ def _naver_get(client: httpx.Client, params: dict, interval: tuple[float, float]
             raise NaverBlocked(f"네이버 차단 신호(HTTP {r.status_code})")
         r.raise_for_status()
         return r.text
+
+
+def naver_more_url(page: str) -> str | None:
+    """첫 화면 다음 기사(무한 스크롤)를 불러오는 주소. 첫 화면 HTML의 XLoad 설정에 들어 있다."""
+    m = re.search(r'new XLoad\(\{\s*"url":\s*"([^"]+)"', page)
+    if not m:
+        return None
+    try:
+        return json.loads(f'"{m.group(1)}"') or None
+    except ValueError:
+        return None
+
+
+def parse_naver_more(body: str) -> tuple[list[dict], str | None]:
+    """무한 스크롤 응답(JSON: collection[].html + 다음 url) → (기사, 다음 주소)."""
+    try:
+        d = json.loads(body)
+    except ValueError:
+        return [], None
+    html = "".join(str(c.get("html") or "") + str(c.get("script") or "") for c in d.get("collection") or [])
+    return parse_naver_news(html), (d.get("url") or None)
 
 
 def _plain(s) -> str:
@@ -212,8 +233,22 @@ META_DATE = [r'property="article:published_time"\s+content="(\d{4}-\d{2}-\d{2})'
              r'(?:입력|등록|승인|기사입력)\s*:?\s*(\d{4}[.-]\d{2}[.-]\d{2})']
 
 
-def article_meta(url: str, client: httpx.Client) -> dict:
-    """기사 페이지에서 발행일·요약(og:description)·링크 상태를 읽는다(본문은 저장하지 않음)."""
+def mention_passage(page_html: str, name: str, width: int = 110) -> str:
+    """기사 본문에서 이름이 처음 나오는 문장 주변만 짧게 (본문 전체는 저장하지 않음)."""
+    body = re.sub(r"<(script|style)[^>]*>.*?</\1>", " ", page_html, flags=re.S | re.I)
+    text = _plain(body)
+    i = text.find(name)
+    if i < 0:
+        return ""
+    lo = max(text.rfind(".", 0, i) + 1, i - width)
+    hi = text.find(".", i)
+    hi = min(hi + 1 if hi >= 0 else len(text), i + width)
+    return text[lo:hi].strip()
+
+
+def article_meta(url: str, client: httpx.Client, name: str | None = None) -> dict:
+    """기사 페이지에서 발행일·요약(og:description)·링크 상태를 읽는다(본문은 저장하지 않음).
+    name을 주면 본문에서 그 이름이 나오는 대목(passage)도 짧게 돌려준다."""
     try:
         r = client.get(url, follow_redirects=True, timeout=LINK_TIMEOUT)
     except httpx.HTTPError:
@@ -232,7 +267,10 @@ def article_meta(url: str, client: httpx.Client) -> dict:
             break
     desc = (re.search(r'<meta[^>]+property="og:description"[^>]+content="([^"]*)"', head)
             or re.search(r'<meta[^>]+content="([^"]*)"[^>]+property="og:description"', head))
-    return {"link_status": "ok", "date": d, "description": _plain(desc.group(1))[:300] if desc else ""}
+    out = {"link_status": "ok", "date": d, "description": _plain(desc.group(1))[:300] if desc else ""}
+    if name:
+        out["passage"] = mention_passage(r.text, name)
+    return out
 
 
 def relative_date(text: str, now: datetime | None = None) -> str | None:
@@ -248,6 +286,24 @@ def relative_date(text: str, now: datetime | None = None) -> str | None:
     return ((now or datetime.now(KST)) - delta).date().isoformat()
 
 
+THEME_STOP = {"IT", "AI", "ESG", "CEO", "CFO", "ETF", "IR", "IPO", "CB", "BW", "MOU", "CES", "KOSPI", "KOSDAQ", "KRX", "DART",
+              "R", "D", "N", "K", "US", "USA", "PC", "TV", "B2B", "B2C"}
+
+
+def theme_terms(articles: list[tuple[str, str]], name: str, limit: int = 2, min_docs: int = 3) -> list[str]:
+    """고객사 기사(제목, 요약)에서 자주 나온 산업 키워드 → 관련 업종 기사 검색어.
+    예: OLED가 여러 기사에 나오면 'OLED 관련주', '증착장비'가 나오면 '증착장비'."""
+    counts: dict[str, int] = {}
+    for title, summary in articles:
+        text = f"{title} {summary}".replace(name, " ")
+        toks = set(re.findall(r"\b[A-Z][A-Za-z0-9]{1,9}\b", text)) - THEME_STOP
+        toks |= set(re.findall(r"[가-힣]{2,6}(?:장비|패널|반도체|소재|부품)", text))
+        for t in toks:
+            counts[t] = counts.get(t, 0) + 1
+    ranked = sorted((t for t, n in counts.items() if n >= min_docs), key=lambda t: (-counts[t], t))[:limit]
+    return [f"{t} 관련주" if re.fullmatch(r"[A-Za-z0-9]+", t) else t for t in ranked]
+
+
 class NaverNewsSearcher:
     """네이버 뉴스 검색(기간 지정·최신순) → 기사 페이지에서 발행일·요약 확인. 별도 키 없음.
 
@@ -261,46 +317,63 @@ class NaverNewsSearcher:
         self.client = client or httpx.Client(headers={"User-Agent": BROWSER_UA, "Accept-Language": "ko-KR,ko;q=0.9",
                                                       "Referer": "https://search.naver.com/"})
 
+    def _pages(self, term: str, ds: str, de: str, pages: int):
+        """첫 화면(10건) + 무한 스크롤 주소로 다음 묶음. 다음 묶음이 실패하면 받은 데까지만 쓴다."""
+        params = {"where": "news", "query": term, "sm": "tab_opt", "sort": "1", "pd": "3",
+                  "ds": f"{ds[:4]}.{ds[4:6]}.{ds[6:]}", "de": f"{de[:4]}.{de[4:6]}.{de[6:]}",
+                  "nso": f"so:dd,p:from{ds}to{de},a:all"}
+        page = _naver_get(self.client, params, self.interval)
+        yield parse_naver_news(page)
+        url = naver_more_url(page)
+        for _ in range(max(1, pages) - 1):
+            if not url:
+                return
+            try:
+                found, url = parse_naver_more(_naver_get(self.client, None, self.interval, url=url))
+            except (NaverBlocked, httpx.HTTPError) as e:
+                log.info("네이버 다음 기사 묶음 실패(%s) — 받은 데까지 사용: %s", term, e)
+                return
+            if not found:
+                return
+            yield found
+
     def search(self, spec: SearchSpec, since: str, until: str) -> list[dict]:
         items: list[dict] = []
         seen: set[str] = set()
         ds, de = since.replace("-", ""), until.replace("-", "")
         for term in spec.terms or []:
+            name = spec.mention or term
             kept = 0
-            for page in range(max(1, spec.pages)):
-                params = {"where": "news", "query": term, "sm": "tab_opt", "sort": "1", "pd": "3",
-                          "ds": f"{ds[:4]}.{ds[4:6]}.{ds[6:]}", "de": f"{de[:4]}.{de[4:6]}.{de[6:]}",
-                          "nso": f"so:dd,p:from{ds}to{de},a:all"}
-                if page:
-                    params["start"] = str(page * 10 + 1)
-                found = parse_naver_news(_naver_get(self.client, params, self.interval))
-                if not found:
-                    break
+            for found in self._pages(term, ds, de, spec.pages):
                 for f in found:
                     if f["url"] in seen:
                         continue
-                    name = (spec.mention or term).replace(" ", "")
-                    if spec.must_mention and name not in (f["title"] + f["snippet"]).replace(" ", ""):
+                    text = f["title"] + " " + f["snippet"]
+                    if spec.context and not re.search(spec.context, text):
                         continue
-                    if spec.context and not re.search(spec.context, f["title"] + " " + f["snippet"]):
-                        continue
+                    # 제목·요약에 이름이 없어도(예: 제목은 'OLED 투자 확대', 본문에 회사명) 본문에서 확인해 남긴다
                     seen.add(f["url"])
-                    items.append({**f, "term": spec.mention or term})
+                    items.append({**f, "term": name, "named": name.replace(" ", "") in text.replace(" ", "")})
                     kept += 1
                     if kept >= spec.per_term:
                         break
-                if kept >= spec.per_term or len(found) < 10:
+                if kept >= spec.per_term:
                     break
         out = []
         for f in items:
-            meta = article_meta(f["url"], self.client)
+            meta = article_meta(f["url"], self.client, name=f["term"] if spec.must_mention else None)
             if meta.get("link_status") == "gone":
                 continue
+            passage = meta.get("passage") or ""
+            if spec.must_mention and not f["named"] and not passage:
+                continue   # 제목·요약·본문 어디에도 이름이 없음
             d = meta.get("date")
             certain = bool(d)
             if not d:
                 d = relative_date(f["when"]) or f.get("img_date")
             summary = f["snippet"]
+            if passage and passage[:30] not in summary:
+                summary = f"{passage} / {summary}" if summary else passage
             if meta.get("description") and meta["description"][:40] not in summary:
                 summary = f"{summary} / {meta['description']}" if summary else meta["description"]
             out.append({"pub_date": d, "date_certain": certain, "outlet": (f["outlet"] or urlparse(f["url"]).netloc)[:100],
