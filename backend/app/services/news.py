@@ -80,6 +80,7 @@ class SearchSpec:
     must_mention: bool = True               # 제목·요약에 이름이 나오는 기사만
     claude_too: bool = False                # 네이버 결과에 Claude 웹검색 결과를 보탤지
     context: str | None = None              # 제목·요약에 함께 나와야 하는 단어(정규식) — 짧은 기업명이 엉뚱한 기사에 걸리는 것 방지
+    in_title: bool = False                  # 검색 키워드가 제목에 있는 기사만(업종 검색용)
 
 
 @dataclass
@@ -351,6 +352,8 @@ class NaverNewsSearcher:
                     text = f["title"] + " " + f["snippet"]
                     if spec.context and not re.search(spec.context, text):
                         continue
+                    if spec.in_title and re.sub(r"\s*관련주$", "", term) not in f["title"]:
+                        continue   # 업종 검색: 키워드(예: OLED)가 제목에 있는 기사만
                     # 제목·요약에 이름이 없어도(예: 제목은 'OLED 투자 확대', 본문에 회사명) 본문에서 확인해 남긴다
                     seen.add(f["url"])
                     items.append({**f, "term": name, "named": name.replace(" ", "") in text.replace(" ", "")})

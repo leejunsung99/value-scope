@@ -138,7 +138,7 @@ def test_weekly_commentary_rejects_statistical_jargon():
     rep = write_report(FakeAI(), "선익시스템", res, ev)
     paras = rep["sections"][0]["paragraphs"]
     assert paras[0]["text"] == "선익시스템 주가는 이번 주 -21.2% 내렸다."
-    assert [p["text"] for p in paras[1:]] == ["이번 주 회사 관련 공시나 언론 보도는 없었습니다."]   # 요약에 이슈 유무가 빠지면 자동 보충
+    assert [p["text"] for p in paras[1:]] == ["이번 주 회사 관련 공시나 언론 보도는 없었다."]   # 요약에 이슈 유무가 빠지면 자동 보충
     assert rep["held"] and "통계 용어" in rep["held"][0]["issues"][0]
     assert "z=" not in rep["headline"] and "개별 요인" not in rep["headline"]   # 규칙 기반 헤드라인으로 대체
 
@@ -159,7 +159,7 @@ def test_hedging_sentences_are_removed_and_overview_states_issue_status():
     ev = build_evidence("T", res, [], [], target_id=1)
     rep = write_report(NoAIProvider(), "T", res, ev)   # 규칙 기반
     overview = next(s for s in rep["sections"] if s["key"] == "overview")
-    assert any("공시나 언론 보도는 없었습니다" in p["text"] for p in overview["paragraphs"])
+    assert any("공시나 언론 보도는 없었다" in p["text"] for p in overview["paragraphs"])
 
     discs = [{"date": "2026-11-03", "company_id": 1, "company": "T", "title": "[기재정정]단일판매ㆍ공급계약체결", "url": "u", "rcept_no": "1"},
              {"date": "2026-11-05", "company_id": 2, "company": "P", "title": "잠정실적", "url": "u2", "rcept_no": "2"}]

@@ -35,7 +35,9 @@ def drivers_title(res: dict) -> str:
 # 'AI 티'가 나는 얼버무림·면책성 문장: 문단에서 해당 문장만 뺀다 (인과 단정 금지 원칙은 보고서 하단 고지 한 줄로 대신)
 HEDGE = re.compile(r"단정(하기|할 수|짓기)|인과\s*관계|확인된 자료만으로|관계는 확인되지|확인되지 않(는다|습니다|았다|았습니다)|"
                    r"판단하기 어렵|알 수 없|보기 어렵|단언하기|명확하지 않|추가 확인이 필요|해석에 주의|신중할 필요|"
-                   r"기 어렵(다|습니다|고)|영향을 (줬|주었|미쳤)는지|얼마나 영향|가능성을 배제")
+                   r"기 어렵(다|습니다|고)|영향을 (줬|주었|미쳤)는지|얼마나 영향|가능성을 배제|"
+                   r"공시로\s*(?:확인된|확인한)\s*(?:내용|사항|것|사실)[은는이가]?\s*아니|공시로\s*확인되지|공시로는\s*확인|"
+                   r"기사\s*해석에\s*근거|보도에\s*근거한\s*(?:해석|것)")
 SENT_SPLIT = re.compile(r"(?<=[다요음]\.)\s+")
 # 시황 서술('매수세가 몰렸다', '순매도')은 투자 권유가 아니다 — 권유 표현 검사 전에 지운다
 MARKET_FLOW = re.compile(r"순매[수도]|매[수도]\s*(?:세|심리|우위|유입|압력|물량|주체|온기|자금|강도)")
@@ -46,8 +48,35 @@ def invest_advice(text: str):
 
 
 def strip_hedges(text: str) -> str:
-    keep = [x for x in SENT_SPLIT.split(text.strip()) if x and not HEDGE.search(x)]
+    keep = [x for x in SENT_SPLIT.split(to_plain_style(text).strip()) if x and not HEDGE.search(x)]
     return " ".join(keep).strip()
+
+
+# 문체 통일: '~습니다/~입니다'체 → '~다'체 (Writer 지침이 1차, 남은 것은 여기서 고친다)
+_ADJ_STEMS = {"크", "다르", "빠르", "느리", "드물", "흐리", "이르", "바쁘", "아프", "기쁘", "슬프", "예쁘", "나쁘", "고프"}
+_END = r"(?=[.,!?)\s'\"]|$)"
+
+
+def _b_nida(m: re.Match) -> str:
+    """'오릅니다' → '오른다'(동사), '큽니다' → '크다'(형용사)."""
+    pre, syl = m.group(1), m.group(2)
+    code = ord(syl) - 0xAC00
+    if code < 0 or code > 11171 or code % 28 != 17:   # 받침 ㅂ 이 아님
+        return m.group(0)
+    open_syl = chr(ord(syl) - 17)                   # 받침 제거
+    stem = pre + open_syl
+    if any(stem.endswith(a) for a in _ADJ_STEMS):
+        return stem + "다"
+    return pre + chr(ord(open_syl) + 4) + "다"      # 받침 ㄴ + 다
+
+
+def to_plain_style(text: str) -> str:
+    t = text or ""
+    t = re.sub(r"(보|줄|높|늘|모|쌓|붙|먹|끓|녹|죽|속)입니다" + _END, r"\1인다", t)   # 동사 '보이다' 등
+    t = re.sub(r"입니다" + _END, "이다", t)
+    t = re.sub(r"습니다" + _END, "다", t)
+    t = re.sub(r"([가-힣]{0,6}?)([가-힣])니다" + _END, _b_nida, t)
+    return t
 
 
 # 보고서에 쓰지 않는 통계·모형 용어 (쓰면 해당 문단을 게시하지 않음)
@@ -55,7 +84,8 @@ JARGON = re.compile(r"z\s*[=값]|z값|표준편차|회귀|β|베타|R²|R2|잔�
 
 WRITER_SYSTEM = """당신은 증권사 리서치센터의 주간 주가 동향 리포트를 쓰는 애널리스트입니다. 1주일(월~일) 주가 흐름만 다룹니다(밸류에이션 언급 금지).
 문체:
-- 고객사 경영진·IR 담당자가 바로 읽을 수 있는 리포트 문체(평서형 '~했다', '~이다')로, 짧고 명확하게 쓰십시오.
+- 고객사 경영진·IR 담당자가 바로 읽을 수 있는 리포트 문체로, 짧고 명확하게 쓰십시오.
+- 모든 문장(headline 포함)은 평서형 '~다'로 끝내십시오('~했다', '~이다', '~됐다', '~보인다'). '~습니다', '~입니다'체는 한 문장도 쓰지 마십시오.
 - 통계·모형 용어를 쓰지 마십시오: z값, 표준편차, 회귀, 베타(β), R², 잔차, 통계적 유의성, 기대수익률, 개별 요인, 이상치 등은 금지.
   대신 '비교기업보다 X%p 더 내렸다', '시장·업종 흐름과 다르게 움직였다', '평소보다 변동이 컸다'처럼 쉬운 말로 쓰십시오.
 - 수치는 수익률(%), 비교기업·시장과의 차이(%p), 같은 방향으로 움직인 일수, 종가, 거래량 배수만 사용하십시오.
@@ -66,7 +96,8 @@ WRITER_SYSTEM = """당신은 증권사 리서치센터의 주간 주가 동향 �
 - 엔진 판정(pattern_label)을 바꾸지 마십시오.
 - 주가 변동의 이유는 '사실 → 보도된 재료 → 해석' 순서로 논리를 세워 쓰십시오.
   사실: 등락률, 같은 날 비교기업·시장·그룹의 움직임, 거래량(모두 근거 display 값).
-  보도된 재료: 기사(news)가 제시한 이유는 '~라는 보도가 나왔다', '~를 배경으로 꼽았다'처럼 보도임을 밝히십시오. 공시로 확인된 것만 사실로 쓰십시오.
+  보도된 재료: 기사(news)가 제시한 이유는 '~라고 보도됐다', '~가 기사에서 언급됐다', '~를 배경으로 꼽았다'처럼 보도임을 밝히고 그 문장으로 깔끔하게 끝내십시오.
+  '다만 이는 기사 해석에 근거한 것으로, 회사 공시로 확인된 내용은 아니다' 같은 단서·면책 문장은 붙이지 마십시오. 공시로 확인된 것만 사실로 쓰십시오.
   해석: 위 두 가지를 연결한 판단을 문단마다 한 번, '~로 해석된다', '~가 주가에 반영된 것으로 판단된다'처럼 쓰십시오.
   해석의 논리: 비교기업·관련 업종이 같은 날 함께 움직였으면 업종 재료(테마·업황) 쪽으로, 회사만 움직였으면 회사 고유 재료 쪽으로 무게를 두십시오.
   여러 재료가 있으면 시점(어느 날 반영됐는지)과 범위(회사만인지 업종 전체인지)로 어느 쪽이 더 설득력 있는지 비교하십시오.
@@ -265,7 +296,7 @@ def issue_sentence(ti: dict) -> str:
     """주간 요약에 넣는 '이번 주 회사 관련 공시·보도' 문장 (없으면 없다고). 조사는 항상 '공시/보도' 뒤에 붙인다."""
     d, n = ti.get("disclosures") or [], ti.get("news") or []
     if not d and not n:
-        return "이번 주 회사 관련 공시나 언론 보도는 없었습니다."
+        return "이번 주 회사 관련 공시나 언론 보도는 없었다."
 
     def listing(items, fmt, noun):
         body = ", ".join(fmt(x) for x in items[:3])
@@ -273,7 +304,7 @@ def issue_sentence(ti: dict) -> str:
 
     dp = listing(d, lambda x: f"{_kdate(x['date'])} '{_clean_title(x['title'])}'", "공시") if d else "공시는 없었"
     np_ = listing(n, lambda x: f"{_kdate(x['date'])} '{x['event']}'", "보도") if n else "언론 보도는 없었"
-    return f"이번 주 회사 관련으로는 {dp}고, {np_}습니다."
+    return f"이번 주 회사 관련으로는 {dp}고, {np_}다."
 
 
 def rule_based(target_name: str, res: dict) -> dict:
@@ -458,10 +489,10 @@ def execute_weekly(session_factory: sessionmaker, wid: str, krx, dart, monitor, 
             themes = news_svc.theme_terms([(x.title, x.summary or "") for x in first.items.get(target_spec.query_key, [])], target.name)
             if themes:
                 specs.append(news_svc.SearchSpec(
-                    f"nv2-week-theme:{project.id}:{mon}", f"관련 업종({', '.join(themes)})",
+                    f"nv3-week-theme:{project.id}:{mon}", f"관련 업종({', '.join(themes)})",
                     f"{', '.join(themes)} 관련 국내 증시·산업 뉴스를 웹검색으로 찾으십시오.",
                     months=1, max_items=10, role="theme", window=win,
-                    terms=themes, pages=2, per_term=8, must_mention=False, context=news_svc.MARKET_CONTEXT))
+                    terms=themes, pages=3, per_term=8, must_mention=False, in_title=True, context=news_svc.MARKET_CONTEXT))
             nres = news_svc.run_searches(db, news_searcher, specs[1:], today, s.news_daily_search_limit)
             nres.outcomes = first.outcomes + nres.outcomes
             nres.items.update(first.items)
