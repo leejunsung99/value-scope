@@ -74,3 +74,20 @@ def test_block_falls_back_to_claude(monkeypatch):
         naver.search(spec, "2026-11-09", "2026-11-15")
     # 검색어가 없는 검색(통합 분석)은 Claude로
     assert comb.search(nw.SearchSpec("k2", "x", "q", 1, 10), "a", "b") == [{"title": "대체"}]
+
+
+def test_context_filter_drops_unrelated_articles(monkeypatch):
+    monkeypatch.setitem(nw._naver_state, "last", 0.0)
+    monkeypatch.setitem(nw._naver_state, "blocked_until", 0.0)
+    items = [{"title": "日 축구, 브라질 또 꺾었다", "url": "https://s.example/1", "content": "야스 선수가 골을 넣었다", "outlet": "S"},
+             {"title": "야스, OLED 증착장비 수주", "url": "https://s.example/2", "content": "야스가 장비를 공급한다", "outlet": "E"}]
+    s = nw.NaverNewsSearcher(interval=(0, 0), client=httpx.Client(transport=_transport(_page(items), "")))
+    spec = nw.SearchSpec("k", "비교기업", "q", 1, 10, terms=["야스"], context=nw.MARKET_CONTEXT)
+    assert [o["title"] for o in s.search(spec, "2026-11-09", "2026-11-15")] == ["야스, OLED 증착장비 수주"]
+
+
+def test_market_flow_words_are_not_advice():
+    from app.services.weekly_run import invest_advice
+    assert invest_advice("반도체 장비주 전반으로 매수세가 확산됐다는 보도가 나왔다.") is None
+    assert invest_advice("외국인 순매도가 이어졌다.") is None
+    assert invest_advice("매수 의견을 유지한다.") is not None

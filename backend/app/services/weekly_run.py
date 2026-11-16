@@ -37,6 +37,12 @@ HEDGE = re.compile(r"단정(하기|할 수|짓기)|인과\s*관계|확인된 자
                    r"판단하기 어렵|알 수 없|보기 어렵|단언하기|명확하지 않|추가 확인이 필요|해석에 주의|신중할 필요|"
                    r"기 어렵(다|습니다|고)|영향을 (줬|주었|미쳤)는지|얼마나 영향|가능성을 배제")
 SENT_SPLIT = re.compile(r"(?<=[다요음]\.)\s+")
+# 시황 서술('매수세가 몰렸다', '순매도')은 투자 권유가 아니다 — 권유 표현 검사 전에 지운다
+MARKET_FLOW = re.compile(r"순매[수도]|매[수도]\s*(?:세|심리|우위|유입|압력|물량|주체|온기|자금|강도)")
+
+
+def invest_advice(text: str):
+    return INVEST_ADVICE.search(MARKET_FLOW.sub("", text or ""))
 
 
 def strip_hedges(text: str) -> str:
@@ -332,8 +338,8 @@ def write_report(ai: AIProvider, target_name: str, res: dict, ev: eng.Evidence) 
             issues = []
             if not [x for x in p.get("evidence_ids", []) if x in ids]:
                 issues.append("유효한 근거 ID 없음")
-            if INVEST_ADVICE.search(p.get("text", "")):
-                issues.append(f"투자 권유 표현: {INVEST_ADVICE.search(p['text']).group(0)}")
+            if invest_advice(p.get("text", "")):
+                issues.append(f"투자 권유 표현: {invest_advice(p['text']).group(0)}")
             bad = check_numbers(p.get("text", ""), values)
             if bad:
                 issues.append("근거와 다른 수치: " + ", ".join(bad[:4]))
@@ -359,7 +365,7 @@ def write_report(ai: AIProvider, target_name: str, res: dict, ev: eng.Evidence) 
             else:
                 out.append({"key": "overview", "title": titles["overview"], "paragraphs": [item]})
     headline = strip_hedges(content.get("headline") or "")
-    if not headline or check_numbers(headline, values) or INVEST_ADVICE.search(headline) or JARGON.search(headline):
+    if not headline or check_numbers(headline, values) or invest_advice(headline) or JARGON.search(headline):
         headline = rule_based(target_name, res)["headline"]
     order = {k: i for i, (k, _) in enumerate(SECTIONS)}
     out.sort(key=lambda x: order.get(x["key"], 99))
@@ -443,7 +449,7 @@ def execute_weekly(session_factory: sessionmaker, wid: str, krx, dart, monitor, 
                     f"nv-week-peers:{project.id}:{mon}", "비교기업",
                     f"다음 기업들의 주요 뉴스를 웹검색으로 찾으십시오: {', '.join(p.company.name for p in peers)}. about에는 기사 주 대상 기업명을 쓰십시오.",
                     months=1, max_items=10, role="peer", window=win,
-                    terms=[p.company.name for p in peers], pages=1, per_term=4))
+                    terms=[p.company.name for p in peers], pages=1, per_term=4, context=news_svc.MARKET_CONTEXT))
             nres = news_svc.run_searches(db, news_searcher, specs, today, s.news_daily_search_limit)
             by_name = {c.name: c.id for c in companies}
             seen_urls: set[str] = set()

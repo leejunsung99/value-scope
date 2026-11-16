@@ -79,6 +79,7 @@ class SearchSpec:
     per_term: int = 10                      # 검색어당 남길 최대 기사 수
     must_mention: bool = True               # 제목·요약에 이름이 나오는 기사만
     claude_too: bool = False                # 네이버 결과에 Claude 웹검색 결과를 보탤지
+    context: str | None = None              # 제목·요약에 함께 나와야 하는 단어(정규식) — 짧은 기업명이 엉뚱한 기사에 걸리는 것 방지
 
 
 @dataclass
@@ -136,6 +137,9 @@ class ClaudeNewsSearcher:
 
 # ------------------------------------------------------------------ searcher (네이버 뉴스 검색 결과 페이지)
 NAVER_SEARCH = "https://search.naver.com/search.naver"
+# 증시·산업 기사임을 보여주는 단어 (비교기업 기사 필터)
+MARKET_CONTEXT = (r"주가|주식|종목|증시|코스닥|코스피|상장|급등|급락|상승|하락|강세|약세|특징주|관련주|수주|공급|계약|실적|매출|"
+                  r"영업이익|흑자|적자|투자|증설|장비|부품|소재|디스플레이|OLED|반도체|패널|공시|시가총액|목표가|애널리스트|증권")
 BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
               "Chrome/130.0.0.0 Safari/537.36")
 _NAVER_LOCK = threading.Lock()
@@ -277,6 +281,8 @@ class NaverNewsSearcher:
                         continue
                     name = (spec.mention or term).replace(" ", "")
                     if spec.must_mention and name not in (f["title"] + f["snippet"]).replace(" ", ""):
+                        continue
+                    if spec.context and not re.search(spec.context, f["title"] + " " + f["snippet"]):
                         continue
                     seen.add(f["url"])
                     items.append({**f, "term": spec.mention or term})
