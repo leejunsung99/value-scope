@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     # 뉴스 검색: Claude CLI 웹검색(가벼운 모델). 하루 검색 횟수 상한(검색 1회 = 기업 1곳 또는 주제 1개)
     news_search_model: str = Field(default="sonnet", alias="NEWS_SEARCH_MODEL")
     news_daily_search_limit: int = Field(default=40, alias="NEWS_DAILY_SEARCH_LIMIT")
+    # 주간 분석 뉴스: 네이버 뉴스 검색 결과 페이지(키 없음). 요청 간격(초)은 차단 방지용 하한·상한
+    news_naver_enabled: bool = Field(default=True, alias="NEWS_NAVER_ENABLED")
+    news_naver_interval_min: float = Field(default=4.0, alias="NEWS_NAVER_INTERVAL_MIN")
+    news_naver_interval_max: float = Field(default=6.5, alias="NEWS_NAVER_INTERVAL_MAX")
     ai_provider: str = Field(default="none", alias="AI_PROVIDER")
     ai_api_key: str = Field(default="", alias="AI_API_KEY")
     ai_model: str = Field(default="claude-opus-5-5", alias="AI_MODEL")
@@ -48,7 +52,7 @@ class Settings(BaseSettings):
             "database": bool(self.database_url),
             "dart": bool(self.dart_api_key),
             "krx": bool(self.krx_api_key),
-            "news": (self.ai_provider or "").lower() == "claude_cli",
+            "news": (self.ai_provider or "").lower() == "claude_cli" or self.news_naver_enabled,
             "dart_monitor": bool(self.dart_monitor_database_url),
             "ai_provider": self.ai_provider,
             "ai_ready": self.ai_provider == "claude_cli"

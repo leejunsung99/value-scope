@@ -31,16 +31,22 @@ def make_clients():
 
 
 def make_news_searcher():
-    """뉴스 검색기 (Claude CLI 웹검색). AI_PROVIDER=claude_cli가 아니거나 CLI가 없으면 None. (테스트에서 교체)"""
-    from app.services.news import ClaudeNewsSearcher, NewsUnavailable
+    """뉴스 검색기: 검색어 지정 검색(주간 분석)은 네이버 뉴스 우선, 나머지는 Claude CLI 웹검색.
+    둘 다 쓸 수 없으면 None. (테스트에서 교체)"""
+    from app.services.news import ClaudeNewsSearcher, CombinedNewsSearcher, NaverNewsSearcher, NewsUnavailable
 
     s = get_settings()
-    if (s.ai_provider or "").lower() != "claude_cli":
+    claude = None
+    if (s.ai_provider or "").lower() == "claude_cli":
+        try:
+            claude = ClaudeNewsSearcher(s.news_search_model)
+        except NewsUnavailable:
+            claude = None
+    naver = NaverNewsSearcher((s.news_naver_interval_min, max(s.news_naver_interval_min, s.news_naver_interval_max))) \
+        if s.news_naver_enabled else None
+    if claude is None and naver is None:
         return None
-    try:
-        return ClaudeNewsSearcher(s.news_search_model)
-    except NewsUnavailable:
-        return None
+    return CombinedNewsSearcher(naver, claude)
 
 
 def _start_thread(run_id: str) -> None:

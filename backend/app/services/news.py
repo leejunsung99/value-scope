@@ -7,6 +7,11 @@
 - 같은 날 같은 검색은 다시 하지 않는다(캐시). 다음 검색은 마지막 검색일 이후만 찾는다(증분).
 - 하루 검색 횟수 상한(NEWS_DAILY_SEARCH_LIMIT)을 넘으면 뉴스만 건너뛰고 분석은 계속한다.
 - 뉴스는 공시보다 신뢰도가 낮은 보조 근거다. 적정가 계산에는 쓰지 않는다.
+검색 경로
+- 검색어(terms)가 지정된 검색(주간 분석)은 네이버 뉴스 검색 결과 페이지를 직접 읽는다(국내 기사 수록 범위가 넓음).
+  IP 차단을 피하려고 네이버 요청은 프로세스 전체에서 한 번에 하나씩, 요청 사이 간격(기본 4~6.5초)을 두고 보낸다.
+  차단 신호(403·429 등)가 오면 30분 동안 네이버 요청을 멈추고 Claude 웹검색으로 대신한다.
+- 기사 날짜는 기사 페이지의 발행 시각(article:published_time 등)으로 확인한다.
 
 검색 계획(역할별 깊이)
 - 고객사: 최근 6개월, 최대 15건
@@ -15,12 +20,16 @@
 """
 from __future__ import annotations
 
+import html as html_lib
 import json
 import logging
+import random
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
@@ -64,6 +73,12 @@ class SearchSpec:
     company_id: int | None = None
     role: str = "target"           # target | peer | theme
     window: tuple[str, str] | None = None   # 고정 기간(YYYY-MM-DD, YYYY-MM-DD) — 주간 분석용. 없으면 최근 months개월
+    terms: list[str] | None = None          # 네이버 뉴스 검색어(지정 시 네이버 우선)
+    mention: str | None = None              # 기사에 반드시 나와야 하는 이름(없으면 검색어). 기사 about에도 씀
+    pages: int = 1                          # 검색어당 네이버 결과 페이지 수(페이지당 10건)
+    per_term: int = 10                      # 검색어당 남길 최대 기사 수
+    must_mention: bool = True               # 제목·요약에 이름이 나오는 기사만
+    claude_too: bool = False                # 네이버 결과에 Claude 웹검색 결과를 보탤지
 
 
 @dataclass
@@ -117,6 +132,206 @@ class ClaudeNewsSearcher:
             detail = (outer or {}).get("result") if isinstance(outer, dict) else (proc.stderr or proc.stdout)
             raise RuntimeError(f"claude CLI 뉴스 검색 실패: {str(detail or '').strip()[:200]}")
         return parse_items(str(outer.get("result") or ""))
+
+
+# ------------------------------------------------------------------ searcher (네이버 뉴스 검색 결과 페이지)
+NAVER_SEARCH = "https://search.naver.com/search.naver"
+BROWSER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
+              "Chrome/130.0.0.0 Safari/537.36")
+_NAVER_LOCK = threading.Lock()
+_naver_state = {"last": 0.0, "blocked_until": 0.0}
+BLOCK_COOLDOWN = 30 * 60   # 차단 신호 후 네이버 요청을 쉬는 시간(초)
+
+
+class NaverBlocked(RuntimeError):
+    pass
+
+
+def _naver_get(client: httpx.Client, params: dict, interval: tuple[float, float]) -> str:
+    """네이버 요청은 프로세스 전체에서 한 번에 하나씩, 요청 사이에 무작위 간격을 둔다."""
+    with _NAVER_LOCK:
+        now = time.monotonic()
+        if now < _naver_state["blocked_until"]:
+            raise NaverBlocked("네이버 요청 일시 중단(최근 차단 신호)")
+        wait = _naver_state["last"] + random.uniform(*interval) - now
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            r = client.get(NAVER_SEARCH, params=params, timeout=15)
+        finally:
+            _naver_state["last"] = time.monotonic()
+        if r.status_code in (403, 429, 503) or "자동입력 방지" in r.text[:20000]:
+            _naver_state["blocked_until"] = time.monotonic() + BLOCK_COOLDOWN
+            raise NaverBlocked(f"네이버 차단 신호(HTTP {r.status_code})")
+        r.raise_for_status()
+        return r.text
+
+
+def _plain(s) -> str:
+    return re.sub(r"\s+", " ", html_lib.unescape(re.sub(r"<[^>]+>", "", str(s or "")))).strip()
+
+
+def parse_naver_news(page: str) -> list[dict]:
+    """검색 결과 페이지에 내장된 렌더링 데이터(JSON)에서 기사 목록을 꺼낸다."""
+    out: list[dict] = []
+    for m in re.finditer(r'entry\.bootstrap\(document\.getElementById\("[^"]+"\),\s*', page):
+        try:
+            obj, _ = json.JSONDecoder().raw_decode(page[m.end():])
+        except ValueError:
+            continue
+        stack = [obj]
+        while stack:
+            o = stack.pop()
+            if isinstance(o, dict):
+                if o.get("type") == "searchBasic" and o.get("titleHref"):
+                    prof = o.get("sourceProfile") or {}
+                    img = re.search(r"%2F(20\d{2})%2F(\d{2})%2F(\d{2})%2F", o.get("imageSrc") or "")
+                    out.append({"title": _plain(o.get("title")), "url": o["titleHref"], "snippet": _plain(o.get("content")),
+                                "outlet": str(prof.get("title") or ""),
+                                "when": " ".join(str(t.get("text") or "") for t in prof.get("subTexts") or []),
+                                "img_date": f"{img.group(1)}-{img.group(2)}-{img.group(3)}" if img else None})
+                stack.extend(reversed(list(o.values())))
+            elif isinstance(o, list):
+                stack.extend(reversed(o))
+    seen, uniq = set(), []
+    for it in out:
+        if it["url"] not in seen:
+            seen.add(it["url"])
+            uniq.append(it)
+    return uniq
+
+
+META_DATE = [r'property="article:published_time"\s+content="(\d{4}-\d{2}-\d{2})',
+             r'content="(\d{4}-\d{2}-\d{2})[^"]*"\s+property="article:published_time"',
+             r'name="(?:pubdate|publish-date|article:published_time|date)"\s+content="(\d{4}-?\d{2}-?\d{2})',
+             r'"datePublished"\s*:\s*"(\d{4}-\d{2}-\d{2})',
+             r'(?:입력|등록|승인|기사입력)\s*:?\s*(\d{4}[.-]\d{2}[.-]\d{2})']
+
+
+def article_meta(url: str, client: httpx.Client) -> dict:
+    """기사 페이지에서 발행일·요약(og:description)·링크 상태를 읽는다(본문은 저장하지 않음)."""
+    try:
+        r = client.get(url, follow_redirects=True, timeout=LINK_TIMEOUT)
+    except httpx.HTTPError:
+        return {"link_status": "gone" if not _resolvable(url) else "unverified"}
+    if r.status_code in (404, 410):
+        return {"link_status": "gone"}
+    if r.status_code >= 400:
+        return {"link_status": "unverified"}
+    head = r.text[:200000]
+    d = None
+    for pat in META_DATE:
+        m = re.search(pat, head)
+        if m:
+            raw = m.group(1).replace(".", "-")
+            d = raw if "-" in raw else f"{raw[:4]}-{raw[4:6]}-{raw[6:8]}"
+            break
+    desc = (re.search(r'<meta[^>]+property="og:description"[^>]+content="([^"]*)"', head)
+            or re.search(r'<meta[^>]+content="([^"]*)"[^>]+property="og:description"', head))
+    return {"link_status": "ok", "date": d, "description": _plain(desc.group(1))[:300] if desc else ""}
+
+
+def relative_date(text: str, now: datetime | None = None) -> str | None:
+    """'19시간 전', '3일 전', '2026.11.10.' → 날짜(추정)."""
+    m = re.search(r"(\d{4})\.(\d{1,2})\.(\d{1,2})", text or "")
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.search(r"(\d+)\s*(분|시간|일|주)\s*전", text or "")
+    if not m:
+        return None
+    n, unit = int(m.group(1)), m.group(2)
+    delta = {"분": timedelta(minutes=n), "시간": timedelta(hours=n), "일": timedelta(days=n), "주": timedelta(weeks=n)}[unit]
+    return ((now or datetime.now(KST)) - delta).date().isoformat()
+
+
+class NaverNewsSearcher:
+    """네이버 뉴스 검색(기간 지정·최신순) → 기사 페이지에서 발행일·요약 확인. 별도 키 없음.
+
+    차단을 피하기 위한 장치: 프로세스 전체 직렬 요청 + 요청 간 무작위 간격(기본 4~6.5초), 검색어·페이지 수 상한,
+    차단 신호(403·429·자동입력 방지) 시 30분 중단. 결과는 run_searches 캐시(같은 기간 재검색 안 함)에 저장된다."""
+
+    model = "naver-news"
+
+    def __init__(self, interval: tuple[float, float] = (4.0, 6.5), client: httpx.Client | None = None):
+        self.interval = interval
+        self.client = client or httpx.Client(headers={"User-Agent": BROWSER_UA, "Accept-Language": "ko-KR,ko;q=0.9",
+                                                      "Referer": "https://search.naver.com/"})
+
+    def search(self, spec: SearchSpec, since: str, until: str) -> list[dict]:
+        items: list[dict] = []
+        seen: set[str] = set()
+        ds, de = since.replace("-", ""), until.replace("-", "")
+        for term in spec.terms or []:
+            kept = 0
+            for page in range(max(1, spec.pages)):
+                params = {"where": "news", "query": term, "sm": "tab_opt", "sort": "1", "pd": "3",
+                          "ds": f"{ds[:4]}.{ds[4:6]}.{ds[6:]}", "de": f"{de[:4]}.{de[4:6]}.{de[6:]}",
+                          "nso": f"so:dd,p:from{ds}to{de},a:all"}
+                if page:
+                    params["start"] = str(page * 10 + 1)
+                found = parse_naver_news(_naver_get(self.client, params, self.interval))
+                if not found:
+                    break
+                for f in found:
+                    if f["url"] in seen:
+                        continue
+                    name = (spec.mention or term).replace(" ", "")
+                    if spec.must_mention and name not in (f["title"] + f["snippet"]).replace(" ", ""):
+                        continue
+                    seen.add(f["url"])
+                    items.append({**f, "term": spec.mention or term})
+                    kept += 1
+                    if kept >= spec.per_term:
+                        break
+                if kept >= spec.per_term or len(found) < 10:
+                    break
+        out = []
+        for f in items:
+            meta = article_meta(f["url"], self.client)
+            if meta.get("link_status") == "gone":
+                continue
+            d = meta.get("date")
+            certain = bool(d)
+            if not d:
+                d = relative_date(f["when"]) or f.get("img_date")
+            summary = f["snippet"]
+            if meta.get("description") and meta["description"][:40] not in summary:
+                summary = f"{summary} / {meta['description']}" if summary else meta["description"]
+            out.append({"pub_date": d, "date_certain": certain, "outlet": (f["outlet"] or urlparse(f["url"]).netloc)[:100],
+                        "title": f["title"][:400], "url": f["url"][:600], "summary": summary[:500], "event": f["title"][:200],
+                        "sentiment": "neutral", "about": f["term"][:200], "link_status": meta.get("link_status", "ok")})
+        return out
+
+
+class CombinedNewsSearcher:
+    """검색어(terms)가 있는 검색은 네이버 우선(+필요 시 Claude 보충), 없으면 Claude 웹검색.
+    네이버가 실패·차단되면 그 검색은 Claude로 대신한다."""
+
+    def __init__(self, naver: NaverNewsSearcher | None, claude: "ClaudeNewsSearcher | None"):
+        self.naver, self.claude = naver, claude
+        self.model = "+".join(x.model for x in (naver, claude) if x is not None)
+
+    def search(self, spec: SearchSpec, since: str, until: str) -> list[dict]:
+        if not spec.terms or self.naver is None:
+            if self.claude is None:
+                return []
+            return self.claude.search(spec, since, until)
+        try:
+            items = self.naver.search(spec, since, until)
+        except (NaverBlocked, httpx.HTTPError) as e:
+            log.warning("네이버 뉴스 검색 실패(%s) — Claude 웹검색으로 대신: %s", spec.label, e)
+            if self.claude is None:
+                raise
+            return self.claude.search(spec, since, until)
+        if spec.claude_too and self.claude is not None:
+            try:
+                urls = {x["url"] for x in items}
+                titles = {re.sub(r"\W", "", x["title"]) for x in items}
+                items += [x for x in self.claude.search(spec, since, until)
+                          if x["url"] not in urls and re.sub(r"\W", "", x["title"]) not in titles]
+            except Exception as e:  # noqa: BLE001 — 보충 검색 실패는 무시
+                log.info("Claude 보충 뉴스 검색 실패(%s): %s", spec.label, e)
+        return items
 
 
 def _first_json_object(text: str):
@@ -286,7 +501,7 @@ def run_searches(db: Session, searcher, specs: list[SearchSpec], today: date, da
                     continue
                 if it["pub_date"] and not (since <= it["pub_date"] <= until):
                     continue   # 기간 밖 기사
-                status = check_link(it["url"], client)
+                status = it.pop("link_status", None) or check_link(it["url"], client)
                 if status == "gone":
                     continue
                 db.add(NewsItem(query_key=spec.query_key, company_id=spec.company_id, link_status=status, **it))

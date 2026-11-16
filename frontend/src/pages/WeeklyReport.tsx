@@ -68,10 +68,12 @@ export default function WeeklyReport() {
   const mkt = r.model.market_label.split(' ')[0]
   const vol = r.volatility
   const events = [...r.disclosures.map((x) => ({ date: x.date, company: x.company, kind: '공시', title: x.title, extra: '', estimated: false })),
-    ...r.news.map((x) => ({ date: x.date, company: x.company, kind: '보도', title: x.event, estimated: !x.date_certain,
+    ...[...r.news.filter((x) => x.company === (w.company_name || '')), ...r.news.filter((x) => x.company !== (w.company_name || '')).slice(0, 15)]
+      .map((x) => ({ date: x.date, company: x.company, kind: '보도', title: x.event, estimated: !x.date_certain,
       extra: `${x.outlets.slice(0, 2).join(', ')}${x.verification === 'confirmed' ? ' · 공시로 확인' : ''}` }))]
     .sort((a, b) => b.date.localeCompare(a.date))
   const hasUnusual = r.days.some((d) => d.abnormal)
+  const hasCauses = !!rep?.sections.find((x) => x.key === 'causes')?.paragraphs.length
 
   return (
     <div className="print-report brief bg-white text-[10.5px] leading-relaxed text-slate-900">
@@ -146,7 +148,11 @@ export default function WeeklyReport() {
             <b>직전 4주 회사 공시</b> — {r.prior_disclosures.map((x) => `${md(x.date)} ${x.title}`).join(' · ')}
           </div>
         )}
-        <H no="4.">회사 고유 이슈</H>
+        {hasCauses && (<>
+          <H no="4.">주가 변동 요인 분석</H>
+          <Body rep={rep} keyName="causes" />
+        </>)}
+        <H no={hasCauses ? '5.' : '4.'}>회사 고유 이슈</H>
         <Body rep={rep} keyName="idiosyncratic" />
         <Fig title={`그림 2. 일별 등락률 — ${target} · 비교기업 평균 · 시장`} source="KRX" note={hasUnusual ? `빨간 막대: 시장·업종 흐름과 다른 이례적 변동일` : undefined}>
           <WeeklyCompareChart days={r.days} targetName={target} />
@@ -179,7 +185,7 @@ export default function WeeklyReport() {
             </tbody>
           </table>
         </Fig>
-        <H no="5.">변동성 · 거래량</H>
+        <H no={hasCauses ? '6.' : '5.'}>변동성 · 거래량</H>
         <Body rep={rep} keyName="volatility" />
         <Fig title="표 3. 이번 주 등락폭·거래량 (평소 대비)" source="KRX" note="평소: 직전 약 3개월(거래량은 직전 1개월) 평균">
           <table className="w-full text-[9.5px]">
@@ -195,7 +201,7 @@ export default function WeeklyReport() {
 
       {/* ============ 3쪽 */}
       <section>
-        <H no="6.">비교기업별 움직임</H>
+        <H no={hasCauses ? '7.' : '6.'}>비교기업별 움직임</H>
         <Fig title="표 4. 비교기업 주간 수익률" source="KRX">
           <table className="w-full text-[9.5px]">
             <thead><tr><Th>기업</Th><Th>구분</Th><Th right>주간 수익률</Th><Th right>{target} 대비</Th><Th right>{target}와 같은 방향</Th></tr></thead>
@@ -213,7 +219,7 @@ export default function WeeklyReport() {
             </tbody>
           </table>
         </Fig>
-        <H no="7.">이번 주 공시·보도</H>
+        <H no={hasCauses ? '8.' : '7.'}>이번 주 공시·보도</H>
         {events.length ? (
           <Fig title="표 5. 고객사·비교기업 공시와 보도" source={r.news_enabled ? 'OpenDART, 언론 보도' : 'OpenDART'} note={events.some((e) => e.estimated) ? '* 보도일 추정' : undefined}>
             <table className="w-full text-[9.5px]">
@@ -227,7 +233,7 @@ export default function WeeklyReport() {
         ) : <p className="text-slate-500">이번 주 고객사·비교기업 공시와 보도는 없었다.</p>}
 
         <div className="pr-keep mt-6 border-t border-slate-300 pt-2 text-[8.5px] leading-relaxed text-slate-500">
-          본 자료는 정보 제공 목적이며 투자 권유가 아닙니다. 공시·보도와 주가 변동의 시점이 겹치더라도 인과관계를 뜻하지는 않습니다.
+          본 자료는 정보 제공 목적이며 투자 권유가 아닙니다. 주가 변동 요인은 시세·공시·언론 보도를 근거로 한 해석으로, 인과관계를 보장하지 않습니다.
         </div>
       </section>
     </div>

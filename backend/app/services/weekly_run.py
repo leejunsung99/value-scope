@@ -23,7 +23,7 @@ from app.services.report import INVEST_ADVICE, check_numbers, known_values
 log = logging.getLogger(__name__)
 
 SECTIONS = [("overview", "주간 요약"), ("comovement", "비교기업과의 동조"), ("drivers", "비교기업 대비 흐름의 배경"),
-            ("idiosyncratic", "회사 고유 이슈"), ("volatility", "변동성·거래량")]
+            ("causes", "주가 변동 요인 분석"), ("idiosyncratic", "회사 고유 이슈"), ("volatility", "변동성·거래량")]
 
 
 def drivers_title(res: dict) -> str:
@@ -58,9 +58,14 @@ WRITER_SYSTEM = """당신은 증권사 리서치센터의 주간 주가 동향 �
 - 제공된 근거(evidence)의 수치·사실만 쓰고, 수치는 근거의 display 값을 그대로 옮기십시오. 새로 계산하지 마십시오.
 - 모든 문단에 근거 ID를 1개 이상 붙이십시오.
 - 엔진 판정(pattern_label)을 바꾸지 마십시오.
-- 공시·보도와 주가 변동은 같은 날 있었던 사실로만 나란히 쓰고, 둘 사이의 인과를 주장하지 마십시오.
+- 주가 변동의 이유는 '사실 → 보도된 재료 → 해석' 순서로 논리를 세워 쓰십시오.
+  사실: 등락률, 같은 날 비교기업·시장·그룹의 움직임, 거래량(모두 근거 display 값).
+  보도된 재료: 기사(news)가 제시한 이유는 '~라는 보도가 나왔다', '~를 배경으로 꼽았다'처럼 보도임을 밝히십시오. 공시로 확인된 것만 사실로 쓰십시오.
+  해석: 위 두 가지를 연결한 판단을 문단마다 한 번, '~로 해석된다', '~가 주가에 반영된 것으로 판단된다'처럼 쓰십시오.
+  해석의 논리: 비교기업·관련 업종이 같은 날 함께 움직였으면 업종 재료(테마·업황) 쪽으로, 회사만 움직였으면 회사 고유 재료 쪽으로 무게를 두십시오.
+  여러 재료가 있으면 시점(어느 날 반영됐는지)과 범위(회사만인지 업종 전체인지)로 어느 쪽이 더 설득력 있는지 비교하십시오.
+  기사에 없는 수급 주체(외국인·기관 순매수 등), 루머, 목표주가는 만들지 마십시오. 기사에 나온 수치를 인용할 때는 보도된 수치임을 밝히십시오.
   '단정하기 어렵다', '인과관계는 확인되지 않는다', '확인된 자료만으로는' 같은 얼버무림·면책 문장은 쓰지 마십시오(보고서 하단에 고지가 따로 있음).
-- 보도(kind=news)는 '~라고 보도됐다'로 쓰고, 공시로 확인된 경우만 사실로 쓰십시오.
 - 주간 요약(overview)에는 주가 흐름과 함께, 이번 주 회사 관련 공시·보도(target_issues)가 있었는지를 반드시 쓰십시오.
   있으면 날짜와 제목을 짧게 쓰고, 없으면 '이번 주 회사 관련 공시나 보도는 없었다'고 쓰십시오.
 - 비교기업 대비 흐름의 배경(drivers)에는 고객사가 비교기업·시장보다 더 내리거나(오르거나) 다르게 움직인 이유를 근거로 설명하십시오.
@@ -76,6 +81,14 @@ WRITER_SYSTEM = """당신은 증권사 리서치센터의 주간 주가 동향 �
   예: 'O월 O일(금) 고객사가 크게 오른 날 유관 장비·부품기업(A사, B사)도 함께 크게 올랐다.' (수치는 근거 display 값 그대로)
       '직접 경쟁기업 평균은 비교기업 전체보다 약했고, 상승은 유관 장비·부품기업이 이끌었다.'
   이때 그 특이사항의 근거 ID(group_notes의 eid)를 붙이십시오. group_notes가 비어 있으면 그룹을 언급하지 마십시오.
+- 주가 변동 요인 분석(causes): 이번 주 주가를 움직인 요인을 2~4개 문단으로 정리하십시오. 이 리포트의 핵심 섹션입니다.
+  · 각 문단은 '요인 하나'(예: 업종 재료, 회사 고유 재료, 직전 흐름의 되돌림)를 다루고, 첫 문장에 그 요인을 한 줄로 밝히십시오.
+  · 크게 움직인 날(일간 ±3% 이상 또는 이례적 변동일)마다 그날·그 직전 주말의 보도(news, 날짜 기준)를 대조해, 어떤 재료가 언제 반영됐는지 쓰십시오.
+  · 고객사 기사뿐 아니라 비교기업·관련 업종 기사(about이 비교기업인 news)도 활용해, 같은 재료로 함께 움직인 기업이 있으면 이름과 등락을 함께 쓰십시오.
+  · 마지막 문단은 이번 주 흐름을 한 문장으로 종합하십시오(어떤 재료가 가장 크게 작용한 것으로 판단되는지).
+  · 보도가 없으면 등락·업종 흐름·직전 흐름만으로 해석하되, 보도가 없었다는 사실을 한 번 밝히십시오.
+  · 문단마다 등락일 근거 ID와 기사 근거 ID(news eid)를 함께 붙이십시오.
+- 주간 요약(overview)에는 요인 분석의 결론을 한 문장으로 미리 밝히십시오.
 - 매수·매도·보유·목표주가 등 투자 권유 표현 금지. 한국어."""
 
 
@@ -211,9 +224,22 @@ def build_evidence(target_name: str, res: dict, discs: list[dict], news_events: 
                           f"{e['date'] or '날짜 미상'}{'' if e['date_certain'] else '(추정)'} {e['event']}"[:100], as_of=e["date"],
                           method=f"{e['summary']} | 보도 {len(e['articles'])}건: {', '.join(e['outlets'][:4])} | "
                                  f"{news_svc.VERIFICATION_LABEL.get(e.get('verification', 'news_only'))}",
-                          source="언론 보도(Claude 웹검색, 링크 확인)", url=e["articles"][0]["url"],
+                          source=f"언론 보도({e['articles'][0].get('outlet') or ''}, 링크 확인)", url=e["articles"][0]["url"],
                           detail={"articles": e["articles"]})
     return ev
+
+
+def news_brief(res: dict, news_events: list[dict], target_id: int, target_name: str) -> list[dict]:
+    """Writer에게 주는 기사 목록: 누구에 관한 기사인지(고객사·비교기업 그룹), 날짜, 제목, 요약, 근거 ID."""
+    group = {p.get("company_id"): (p["name"], wk.GROUP_LABELS.get(p.get("category") or "E")) for p in res.get("peers") or []}
+    out = []
+    for e in sorted(news_events, key=lambda x: x.get("date") or ""):
+        cid = e.get("company_id")
+        who, role = (target_name, "고객사") if cid == target_id else group.get(cid, (e.get("about") or "", "관련 기사"))
+        out.append({"eid": e.get("eid"), "date": e.get("date"), "date_certain": e.get("date_certain"), "about": who, "role": role,
+                    "title": e.get("event"), "outlets": (e.get("outlets") or [])[:3], "articles": len(e.get("articles") or []),
+                    "summary": (e.get("summary") or "")[:300], "verification": e.get("verification")})
+    return out
 
 
 def _kdate(iso: str | None) -> str:
@@ -279,14 +305,15 @@ def write_report(ai: AIProvider, target_name: str, res: dict, ev: eng.Evidence) 
                "context": {**{k: (res.get("context") or {}).get(k) for k in ("pre_start", "pre_end", "target_pre", "peer_pre", "market_pre",
                                                                              "target_5w", "peer_5w", "market_5w", "diverged_days")},
                            "eid": sm.get("eids", {}).get("context"), "eid_5w": sm.get("eids", {}).get("context_5w")},
-               "prior_disclosures": {"items": res.get("prior_disclosures") or [], "eid": sm.get("eids", {}).get("prior")}}
+               "prior_disclosures": {"items": res.get("prior_disclosures") or [], "eid": sm.get("eids", {}).get("prior")},
+               "news": res.get("news_brief") or []}
     try:
         r = ai.complete_json(WRITER_SYSTEM,
                              "## 엔진 결과\n" + json.dumps(payload, ensure_ascii=False, default=str)
                              + "\n\n## 근거(evidence)\n" + json.dumps([{k: e[k] for k in ("eid", "kind", "label", "display", "as_of", "method", "source")}
                                                                     for e in ev.items], ensure_ascii=False)
                              + "\n\n## 작성 지시\n섹션: " + ", ".join(f"{k}={t}" for k, t in SECTIONS)
-                             + "\n각 섹션 1~2개 문단, 문단당 2~3문장으로 간결하게. headline은 이번 주 흐름을 한 문장으로(판정 포함, 수치는 수익률·차이만).",
+                             + "\n각 섹션 1~2개 문단(causes는 2~4개), 문단당 2~4문장. headline은 이번 주 흐름과 핵심 요인을 한 문장으로(판정 포함, 수치는 수익률·차이만).",
                              writer_schema())
         content, model = r.data, r.model
     except (AIUnavailable, AIError) as e:
@@ -401,32 +428,33 @@ def execute_weekly(session_factory: sessionmaker, wid: str, krx, dart, monitor, 
         # 3) 해당 주 뉴스
         news_events: list[dict] = []
         if w.options.get("include_news", True) and news_searcher is not None:
-            _stage(db, w, "뉴스 검색")
+            _stage(db, w, "뉴스 검색(네이버 뉴스, 요청 간격 두고 순차 검색)")
             win = (mon.isoformat(), sun.isoformat())
-            peer_names = ", ".join(p.company.name for p in peers)
-            specs = [news_svc.SearchSpec(f"week:{target.id}:{mon}", target.name,
-                                         f"'{target.name}'(종목코드 {target.stock_code}) 관련 뉴스를 웹검색으로 찾으십시오. 주가 변동 사유, 수주, 실적, 공시, 업황 포함.",
-                                         months=1, max_items=10, company_id=target.id, role="target", window=win)]
-            if peer_names:
-                specs.append(news_svc.SearchSpec(f"week-peers:{project.id}:{mon}", "비교기업",
-                                                 f"다음 기업들의 주요 뉴스를 웹검색으로 찾으십시오: {peer_names}. about에는 기사 주 대상 기업명을 쓰십시오.",
-                                                 months=1, max_items=10, role="peer", window=win))
-            # 비교기업과 다르게 움직인 주에는 '왜' 그랬는지에 초점을 둔 검색을 하나 더 한다(주 시작 3일 전 ~ 주말)
-            pre = wk.quick_gap(db, target, peers, mon, sun)
-            if pre is not None and abs(pre) >= wk.GAP_NOTE:
-                direction = "약세(하락)" if pre < 0 else "강세(상승)"
+            # 고객사: 직전 주말 보도(월요일 주가에 반영)부터. 종목명 + '주가' 두 검색어, 최대 3쪽
+            specs = [news_svc.SearchSpec(
+                f"nv-week:{target.id}:{mon}", target.name,
+                f"'{target.name}'(종목코드 {target.stock_code}) 관련 뉴스를 웹검색으로 찾으십시오. 주가 변동 사유, 수주, 실적, 공시, 업황 포함.",
+                months=1, max_items=10, company_id=target.id, role="target",
+                window=((mon - timedelta(days=2)).isoformat(), sun.isoformat()),
+                terms=[target.name, f"{target.name} 주가"], mention=target.name, pages=3, per_term=20)]
+            # 비교기업(동종업계·장비·고객·소재): 기업당 1쪽, 기업명이 나오는 기사 최대 4건
+            if peers:
                 specs.append(news_svc.SearchSpec(
-                    f"week-why:{target.id}:{mon}", f"{target.name} {direction} 배경",
-                    f"'{target.name}'(종목코드 {target.stock_code}) 주가가 {mon}~{sun} 주간에 업종·시장보다 {direction}을 보인 이유를 다룬 기사를 웹검색으로 찾으십시오. "
-                    "수급(외국인·기관 매매, 차익실현, 공매도, 대주주·임원 지분 변동, 전환사채 물량), 실적 전망, 수주, 업황, 증권가 의견 등 주가 흐름의 배경을 설명한 기사 위주.",
-                    months=1, max_items=8, company_id=target.id, role="target", window=((mon - timedelta(days=3)).isoformat(), sun.isoformat())))
+                    f"nv-week-peers:{project.id}:{mon}", "비교기업",
+                    f"다음 기업들의 주요 뉴스를 웹검색으로 찾으십시오: {', '.join(p.company.name for p in peers)}. about에는 기사 주 대상 기업명을 쓰십시오.",
+                    months=1, max_items=10, role="peer", window=win,
+                    terms=[p.company.name for p in peers], pages=1, per_term=4))
             nres = news_svc.run_searches(db, news_searcher, specs, today, s.news_daily_search_limit)
             by_name = {c.name: c.id for c in companies}
+            seen_urls: set[str] = set()
             for sp in specs:
-                evs = news_svc.group_events(nres.items.get(sp.query_key, []))
+                items = [x for x in nres.items.get(sp.query_key, []) if x.url not in seen_urls]
+                seen_urls.update(x.url for x in items)
+                evs = news_svc.group_events(items)
                 for e in evs:
                     if not e.get("company_id"):
-                        e["company_id"] = next((cid for nm, cid in by_name.items() if nm and nm in (e.get("about") or "")), None)
+                        e["company_id"] = next((cid for nm, cid in sorted(by_name.items(), key=lambda kv: -len(kv[0] or ""))
+                                                if nm and nm in (e.get("about") or "")), None)
                 news_svc.match_disclosures(db, evs)
                 news_events += evs
             for o in nres.outcomes:
@@ -453,7 +481,9 @@ def execute_weekly(session_factory: sessionmaker, wid: str, krx, dart, monitor, 
         # 5) 해석
         _stage(db, w, "AI 해석 작성")
         ev = build_evidence(target.name, res, discs, news_events, target_id=target.id)
+        res["news_brief"] = news_brief(res, news_events, target.id, target.name)
         rep = write_report(ai, target.name, res, ev)
+        res.pop("news_brief", None)
         rep["evidence"] = ev.items
         for e in rep["errors"]:
             _msg(db, w, "warning", e)

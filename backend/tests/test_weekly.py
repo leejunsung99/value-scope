@@ -78,11 +78,14 @@ def test_weekly_links_news_to_days(client, db, monkeypatch):
 
     class WeekNews(FakeNewsSearcher):
         def search(self, spec, since, until):
-            assert (since, until) == ("2026-10-26", "2026-11-01")   # 해당 주로 고정된 검색 기간
             if spec.role == "target":
+                # 고객사: 직전 주말 보도부터(월요일 주가에 반영), 네이버 검색어 = 종목명 + '종목명 주가'
+                assert (since, until) == ("2026-10-24", "2026-11-01")
+                assert spec.terms == ["선익시스템", "선익시스템 주가"] and spec.mention == "선익시스템"
                 return [{"pub_date": "2026-10-28", "date_certain": True, "outlet": "뉴스", "title": "선익시스템 수주",
                          "url": "https://n.example/1", "summary": "보도", "event": "신규 수주 보도", "sentiment": "positive",
                          "about": "선익시스템"}]
+            assert (since, until) == ("2026-10-26", "2026-11-01")   # 비교기업: 해당 주
             return []
 
     pid = _setup_project(client)
