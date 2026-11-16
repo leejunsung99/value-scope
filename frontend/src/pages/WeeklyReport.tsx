@@ -13,7 +13,8 @@ import { Td, Th } from './PrintReport'
 const pct = (v: number | null | undefined, d = 1) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(d)}%`)
 const pp = (v: number | null | undefined) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%p`)
 const md = (iso: string) => `${Number(iso.slice(5, 7))}월 ${Number(iso.slice(8, 10))}일`
-const TONE: Record<string, string> = { comove: 'bg-blue-800', idiosyncratic: 'bg-red-700', mixed: 'bg-amber-600' }
+/** 루미네어IR 로고 색(노랑 → 주황) — '이번 주 흐름' 박스 */
+const BRAND_GRADIENT = 'linear-gradient(120deg, #FFC21A 0%, #F8A01E 45%, #F08419 100%)'
 /** '비교기업과 동반 하락 (비교기업보다 10.8%p 약세)' → ['비교기업과 동반 하락', '비교기업보다 10.8%p 약세'] */
 export function splitLabel(label: string): [string, string | null] {
   const m = /^(.*?)\s*\((.*)\)\s*$/.exec(label)
@@ -76,20 +77,18 @@ export default function WeeklyReport() {
       <section>
         <div className="flex items-end justify-between border-b-[3px] border-slate-900 pb-2">
           <div>
+            <img src="/luminaire-ir-logo.png" alt="Luminaire IR" className="mb-2 h-[20px] w-auto" />
             <div className="text-[9px] font-semibold uppercase tracking-[0.2em] text-violet-800">Weekly Price Report</div>
             <h1 className="text-[26px] font-bold leading-tight">{target} <span className="text-[13px] font-normal text-slate-500">주간 주가 동향</span></h1>
           </div>
-          <div className="text-right text-[9px] text-slate-500">
-            <div className="text-[11px] font-semibold text-slate-800">{wkLabel}</div>
-            <div>{r.week.trading_days}거래일 · {md(r.week.base_date)} 종가 대비</div>
-          </div>
+          <div className="text-right text-[11px] font-semibold text-slate-800">{wkLabel}</div>
         </div>
         {rep?.headline && <p className="mt-3 text-[12.5px] font-semibold leading-[1.65]">{rep.headline}</p>}
 
         <div className="mt-3 grid grid-cols-[196px_1fr] gap-5">
           <aside className="space-y-2">
-            <div className={`${TONE[s.pattern] ?? 'bg-slate-600'} rounded px-3 py-2 text-white`}>
-              <div className="text-[9px] opacity-80">이번 주 흐름</div>
+            <div className="rounded px-3 py-2 text-[#2a1700]" style={{ background: BRAND_GRADIENT }} data-pattern={s.pattern}>
+              <div className="text-[9px] opacity-75">이번 주 흐름</div>
               <div className="text-[14px] font-bold leading-snug">{splitLabel(s.pattern_label)[0]}</div>
               {splitLabel(s.pattern_label)[1] && <div className="mt-0.5 text-[11px] font-semibold opacity-90">{splitLabel(s.pattern_label)[1]}</div>}
             </div>
@@ -130,7 +129,7 @@ export default function WeeklyReport() {
             <table className="w-full text-[9.5px]">
               <thead><tr><Th>구분</Th><Th right>직전 4주</Th><Th right>이번 주</Th><Th right>5주 누적</Th></tr></thead>
               <tbody>
-                <tr className="bg-blue-50 font-semibold"><Td>{target}</Td><Td right>{pct(r.context.target_pre)}</Td><Td right>{pct(s.target_return)}</Td><Td right>{pct(r.context.target_5w)}</Td></tr>
+                <tr className="bg-amber-50 font-semibold"><Td>{target}</Td><Td right>{pct(r.context.target_pre)}</Td><Td right>{pct(s.target_return)}</Td><Td right>{pct(r.context.target_5w)}</Td></tr>
                 <tr className="font-semibold"><Td>비교기업 평균</Td><Td right>{pct(r.context.peer_pre)}</Td><Td right>{pct(s.peer_return)}</Td><Td right>{pct(r.context.peer_5w)}</Td></tr>
                 <tr><Td>시장({mkt})</Td><Td right>{pct(r.context.market_pre)}</Td><Td right>{pct(s.market_return)}</Td><Td right>{pct(r.context.market_5w)}</Td></tr>
                 {[...r.context.peers].sort((a, b) => b.pre_4w - a.pre_4w).map((p) => (
@@ -199,7 +198,7 @@ export default function WeeklyReport() {
           <table className="w-full text-[9.5px]">
             <thead><tr><Th>기업</Th><Th right>주간 수익률</Th><Th right>{target} 대비</Th><Th right>{target}와 같은 방향</Th></tr></thead>
             <tbody>
-              <tr className="bg-blue-50 font-semibold"><Td>{target}</Td><Td right>{pct(s.target_return)}</Td><Td right>—</Td><Td right>—</Td></tr>
+              <tr className="bg-amber-50 font-semibold"><Td>{target}</Td><Td right>{pct(s.target_return)}</Td><Td right>—</Td><Td right>—</Td></tr>
               {[...r.peers].sort((a, b) => (b.week_return ?? -9) - (a.week_return ?? -9)).map((p) => (
                 <tr key={p.company_id}>
                   <Td>{p.name}</Td>

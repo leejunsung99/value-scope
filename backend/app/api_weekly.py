@@ -107,7 +107,7 @@ def weekly_pdf(project_id: str, weekly_id: str, db: Session = Depends(get_sessio
     wk_tag = w.week_start.replace("-", "")
     try:
         pdf = render_pdf(f"http://{host}:{s.app_port}/print/projects/{project_id}/weekly/{weekly_id}", s.pdf_browser_path or None,
-                         footer=f"ValueScope Weekly  |  {code}  |  week of {w.week_start}  |  Not investment advice")
+                         footer=f"{name}({code})  |  {w.week_start.replace('-', '.')}~{w.week_end.replace('-', '.')}" if code else f"{name}  |  {w.week_start.replace('-', '.')}~{w.week_end.replace('-', '.')}")
     except PdfUnavailable as e:
         raise HTTPException(503, str(e)) from e
     safe = re.sub(r'[\\/:*?"<>|]', "", name).strip() or "report"

@@ -61,17 +61,40 @@ def render_pdf(url: str, browser: str | None = None, footer: str = "ValueScope a
         if not out.is_file() or out.stat().st_size < 1000:
             raise PdfUnavailable("브라우저가 PDF를 만들지 못했습니다. 화면 상단의 '브라우저 인쇄로 저장'을 이용하세요.")
         data = out.read_bytes()
+        # 한글 꼬리말은 내장 Helvetica로 찍을 수 없으므로 같은 브라우저로 꼬리말만 담은 한 쪽짜리 PDF를 만들어 겹친다.
+        label_pdf = None if footer.isascii() else _label_pdf(exe, work, footer)
         try:
-            return add_page_numbers(data, footer)
+            return add_page_numbers(data, footer, label_pdf)
         except Exception:  # noqa: BLE001 — 쪽 번호 실패가 PDF 출력을 막지 않도록
             return data
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
 
+def _label_pdf(exe: str, work: Path, label: str) -> bytes | None:
+    """A4 한 쪽, 배경 없음, 왼쪽 아래(쪽 번호와 같은 높이)에 label만 있는 PDF. 실패하면 None(ASCII만 찍힘)."""
+    import html
 
-def add_page_numbers(pdf: bytes, label: str = "ValueScope") -> bytes:
-    """각 쪽 하단에 쪽 번호('n / N')와 왼쪽 label을 찍는다. 내장 Helvetica(ASCII)만 써서 외부 폰트·DLL이 필요 없다."""
+    page = work / "footer.html"
+    out = work / "footer.pdf"
+    page.write_text(
+        "<!doctype html><meta charset='utf-8'><style>@page{size:A4;margin:0}html,body{margin:0;padding:0}"
+        "div{position:fixed;left:40pt;bottom:18pt;line-height:1;white-space:nowrap;color:rgb(115,115,115);"
+        "font:7pt 'Malgun Gothic','Noto Sans KR','Apple SD Gothic Neo',sans-serif}</style>"
+        f"<div>{html.escape(label)}</div>", encoding="utf-8")
+    cmd = [exe, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-extensions",
+           f"--user-data-dir={work / 'profile'}", "--no-pdf-header-footer", f"--print-to-pdf={out}", page.as_uri()]
+    try:
+        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=TIMEOUT_S, check=False)
+    except subprocess.TimeoutExpired:
+        return None
+    return out.read_bytes() if out.is_file() and out.stat().st_size > 500 else None
+
+
+
+def add_page_numbers(pdf: bytes, label: str = "ValueScope", label_pdf: bytes | None = None) -> bytes:
+    """각 쪽 하단에 쪽 번호('n / N')와 왼쪽 label을 찍는다. 내장 Helvetica(ASCII)만 써서 외부 폰트·DLL이 필요 없다.
+    label_pdf(브라우저로 만든 꼬리말 한 쪽)가 있으면 왼쪽 label은 그 쪽을 겹쳐 찍는다(한글 가능)."""
     import io
 
     from pypdf import PageObject, PdfReader, PdfWriter
@@ -79,8 +102,11 @@ def add_page_numbers(pdf: bytes, label: str = "ValueScope") -> bytes:
 
     writer = PdfWriter(clone_from=PdfReader(io.BytesIO(pdf)))
     n = len(writer.pages)
-    safe = "".join(ch for ch in label if 32 <= ord(ch) < 127 and ch not in "\()")
+    label_page = PdfReader(io.BytesIO(label_pdf)).pages[0] if label_pdf else None
+    safe = "" if label_page else "".join(ch for ch in label if 32 <= ord(ch) < 127 and ch not in "\()")
     for i, page in enumerate(writer.pages, start=1):
+        if label_page is not None:
+            page.merge_page(label_page)
         w, h = float(page.mediabox.width), float(page.mediabox.height)
         num = f"{i} / {n}"
         # 쪽 번호는 오른쪽 아래 — 왼쪽 꼬리말이 길어도 겹치지 않게
