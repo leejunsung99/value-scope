@@ -13,6 +13,8 @@ import { Td, Th } from './PrintReport'
 const pct = (v: number | null | undefined, d = 1) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(d)}%`)
 const pp = (v: number | null | undefined) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(1)}%p`)
 const md = (iso: string) => `${Number(iso.slice(5, 7))}월 ${Number(iso.slice(8, 10))}일`
+/** 비교기업 구분 (비교군 분류 A~E) */
+const GROUP_SHORT: Record<string, string> = { A: '직접 경쟁', B: '장비·부품', C: '전방·고객', D: '소재·기술', E: '기타' }
 /** 루미네어IR 로고 색(노랑 → 주황) — '이번 주 흐름' 박스 */
 const BRAND_GRADIENT = 'linear-gradient(120deg, #FFC21A 0%, #F8A01E 45%, #F08419 100%)'
 /** '비교기업과 동반 하락 (비교기업보다 10.8%p 약세)' → ['비교기업과 동반 하락', '비교기업보다 10.8%p 약세'] */
@@ -196,12 +198,13 @@ export default function WeeklyReport() {
         <H no="6.">비교기업별 움직임</H>
         <Fig title="표 4. 비교기업 주간 수익률" source="KRX">
           <table className="w-full text-[9.5px]">
-            <thead><tr><Th>기업</Th><Th right>주간 수익률</Th><Th right>{target} 대비</Th><Th right>{target}와 같은 방향</Th></tr></thead>
+            <thead><tr><Th>기업</Th><Th>구분</Th><Th right>주간 수익률</Th><Th right>{target} 대비</Th><Th right>{target}와 같은 방향</Th></tr></thead>
             <tbody>
-              <tr className="bg-amber-50 font-semibold"><Td>{target}</Td><Td right>{pct(s.target_return)}</Td><Td right>—</Td><Td right>—</Td></tr>
+              <tr className="bg-amber-50 font-semibold"><Td>{target}</Td><Td>—</Td><Td right>{pct(s.target_return)}</Td><Td right>—</Td><Td right>—</Td></tr>
               {[...r.peers].sort((a, b) => (b.week_return ?? -9) - (a.week_return ?? -9)).map((p) => (
                 <tr key={p.company_id}>
                   <Td>{p.name}</Td>
+                  <Td className="whitespace-nowrap text-slate-500">{GROUP_SHORT[p.category ?? 'E'] ?? '기타'}</Td>
                   <Td right>{p.available ? pct(p.week_return) : '시세 없음'}</Td>
                   <Td right>{p.available && p.week_return != null ? pp(p.week_return - s.target_return) : '—'}</Td>
                   <Td right>{p.available ? `${r.week.trading_days}일 중 ${p.same_dir_days}일` : '—'}</Td>

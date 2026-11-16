@@ -70,6 +70,12 @@ WRITER_SYSTEM = """당신은 증권사 리서치센터의 주간 주가 동향 �
   ③ 직전 4주 회사 공시 중 주식 수급·투자심리에 영향을 줄 수 있는 것(전환청구·대량보유 변동·지분 매도·유상증자·계약 정정 등).
   ④ 관련 보도(kind=news)에서 언급된 약세·강세 사유.
   해석은 '~한 흐름으로 볼 수 있다', '~의 영향이 반영된 것으로 보인다'처럼 근거 바로 뒤에 한 번만 붙이고, 근거 없는 사유(수급 주체, 루머 등)는 만들지 마십시오.
+- 비교기업 구분(peer_groups: 직접 경쟁기업, 유관 장비·부품기업, 전방산업·주요 고객기업, 소재·기술 관련 기업):
+  판정과 설명은 기본적으로 비교기업 전체 평균 하나로 하십시오. 그룹별로 매번 나눠 쓰지 마십시오.
+  특이사항(group_notes)이 있을 때만 해당 섹션(comovement 또는 drivers)에서 1~2문장으로 나눠 쓰십시오.
+  예: 'O월 O일(금) 고객사가 크게 오른 날 유관 장비·부품기업(A사, B사)도 함께 크게 올랐다.' (수치는 근거 display 값 그대로)
+      '직접 경쟁기업 평균은 비교기업 전체보다 약했고, 상승은 유관 장비·부품기업이 이끌었다.'
+  이때 그 특이사항의 근거 ID(group_notes의 eid)를 붙이십시오. group_notes가 비어 있으면 그룹을 언급하지 마십시오.
 - 매수·매도·보유·목표주가 등 투자 권유 표현 금지. 한국어."""
 
 
@@ -178,6 +184,25 @@ def build_evidence(target_name: str, res: dict, discs: list[dict], news_events: 
             p["eid"] = ev.add("calc", f"{p['name']} 주간 수익률", p["week_return"], "ratio",
                               f"{pct(p['week_return'])} (고객사와 같은 방향 {p['same_dir_days']}일)", period=period,
                               method="KRX 종가 기준", source="KRX 일별매매정보")
+    # 비교기업 세부 그룹 특이사항 (있을 때만 리포트에 언급)
+    if res.get("group_notes"):
+        groups = res.get("groups") or []
+        s["eids"]["groups"] = ev.add("calc", "비교기업 그룹별 주간 평균 수익률", None, None,
+                                     " · ".join(f"{g['label']}({g['n']}곳) {pct(g['week_return'])}" for g in groups)
+                                     + f" · 전체 평균 {pct(s['peer_return'])}", period=period, method="그룹 내 단순 평균",
+                                     source="KRX 일별매매정보", detail={g["category"]: g["week_return"] for g in groups})
+    for n in res.get("group_notes") or []:
+        if n["kind"] == "week":
+            names = ", ".join(f"{m['name']} {pct(m['week_return'])}" for m in n["members"])
+            n["eid"] = ev.add("calc", f"{n['label']} 주간 평균 수익률(비교기업 전체와 차이)", n["group_return"], "ratio",
+                              f"{n['label']} 평균 {pct(n['group_return'])}({names}) · 비교기업 전체 평균 {pct(n['peer_return'])} "
+                              f"· 차이 {n['gap'] * 100:+.1f}%p", period=period, method="그룹 내 단순 평균", source="KRX 일별매매정보")
+        else:
+            parts = "; ".join(f"{g['label']} 평균 {pct(g['group_ret'])}(" + ", ".join(f"{m['name']} {pct(m['ret'])}" for m in g["members"]) + ")"
+                              for g in n["groups"])
+            n["eid"] = ev.add("calc", f"{n['date']}({n['weekday']}) {target_name} 급등락일 함께 움직인 비교기업 그룹", n["target_ret"], "ratio",
+                              f"{n['date']}({n['weekday']}) {target_name} {pct(n['target_ret'])} · 비교기업 전체 평균 {pct(n.get('peer_avg'))} · {parts}",
+                              as_of=n["date"], method="그룹 내 단순 평균", source="KRX 일별매매정보")
     for x in discs:
         x["eid"] = ev.add("fact", f"{x['company']} 공시: {x['title']}", None, None, f"{x['date']} {x['title']}"[:100], as_of=x["date"],
                           source="OpenDART", url=x["url"], rcept_no=x["rcept_no"])
@@ -246,7 +271,10 @@ def write_report(ai: AIProvider, target_name: str, res: dict, ev: eng.Evidence) 
                                                   "pattern_label", "same_dir_days", "judged_days", "abnormal_days", "volatility_label")},
                "days": [{"date": d["date"], "weekday": d["weekday"], "return": d["ret"], "peer_avg": d.get("peer_avg"), "market": d["market"],
                          "unusual_move": d["abnormal"], "volume_vs_usual": d.get("volume_ratio"), "eid": d.get("eid")} for d in res["days"]],
-               "peers": [{k: p.get(k) for k in ("name", "week_return", "same_dir_days", "eid")} for p in res["peers"]],
+               "peers": [{**{k: p.get(k) for k in ("name", "week_return", "same_dir_days", "eid")},
+                          "group": wk.GROUP_LABELS.get(p.get("category") or "E")} for p in res["peers"]],
+               "peer_groups": [{k: g[k] for k in ("label", "n", "members", "week_return")} for g in res.get("groups") or []],
+               "group_notes": res.get("group_notes") or [], "groups_eid": sm.get("eids", {}).get("groups"),
                "target_issues": {**(res.get("target_issues") or {}), "eid": sm.get("eids", {}).get("issues")},
                "context": {**{k: (res.get("context") or {}).get(k) for k in ("pre_start", "pre_end", "target_pre", "peer_pre", "market_pre",
                                                                              "target_5w", "peer_5w", "market_5w", "diverged_days")},
@@ -411,6 +439,7 @@ def execute_weekly(session_factory: sessionmaker, wid: str, krx, dart, monitor, 
         # 4) 계산
         _stage(db, w, "주가 동조·개별 요인 계산")
         res = wk.compute(db, target, peers, mon, sun)
+        res["groups"], res["group_notes"] = wk.group_breakdown(res)
         wk.attach_events(res, target.id, discs, news_events)
         res["disclosures"] = discs
         res["prior_disclosures"] = prior_discs

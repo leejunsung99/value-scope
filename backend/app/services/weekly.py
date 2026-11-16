@@ -41,6 +41,11 @@ DIVERGE_GAP = 0.03     # 하루 수익률이 비교기업 평균과 3%p 이상 �
 PRE_DAYS = 28          # 직전 비교 구간(약 4주)        # 동조 판정이어도 비교군과 주간 수익률 차이가 5%p 이상이면 라벨에 표시
 USE_W = {"valuation": 1.0, "industry_reference": 0.5}
 WEEKDAYS = ["월", "화", "수", "목", "금", "토", "일"]
+# 비교기업 세부 그룹 (비교군 분류와 같은 이름). 판정은 비교기업 전체 기준으로 하고, 그룹은 특이사항이 있을 때만 리포트에 언급한다.
+GROUP_LABELS = {"A": "직접 경쟁기업", "B": "유관 장비·부품기업", "C": "전방산업·주요 고객기업", "D": "소재·기술 관련 기업", "E": "기타 관련 기업"}
+GROUP_WEEK_GAP = 0.05   # 그룹 평균 주간 수익률이 비교기업 전체 평균과 5%p 이상 차이 나면 특이사항
+BIG_DAY = 0.04          # 고객사가 하루 4% 이상 움직인 날 — 같은 방향으로 크게 움직인 그룹이 있는지 본다
+BIG_DAY_SHARE = 0.5     # 그 날 그룹 평균이 고객사 등락의 절반 이상(같은 방향)이면 '함께 움직임'
 
 
 class WeeklyError(Exception):
@@ -308,6 +313,54 @@ def compute(db: Session, target: Company, peers: list[PeerInfo], mon: date, sun:
         "days": days, "peers": peer_rows, "volatility": vol, "model": model, "chart": chart, "context": context,
         "thresholds": {"z_day": Z_DAY, "z_week": Z_WEEK, "vol_ratio": VOL_RATIO, "range_ratio": RANGE_RATIO, "volume_ratio": VOLUME_RATIO},
     }
+
+
+def group_breakdown(res: dict) -> tuple[list[dict], list[dict]]:
+    """비교기업을 분류(직접 경쟁·유관 장비·부품·전방 고객·소재·기술)별로 묶어 주간·일별 평균을 낸다(그룹 안은 단순 평균).
+    notes = 리포트에 언급할 특이사항만:
+      week: 그룹 평균이 비교기업 전체 평균과 GROUP_WEEK_GAP 이상 다름 (그룹이 2개 이상일 때만)
+      day:  고객사가 BIG_DAY 이상 움직인 날, 같은 방향으로 고객사 등락의 BIG_DAY_SHARE 이상 움직인 그룹"""
+    s = res["summary"]
+    dates = [d["date"] for d in res["days"]]
+    by: dict[str, list[dict]] = {}
+    for p in res["peers"]:
+        if p.get("available") and p.get("week_return") is not None:
+            by.setdefault(p.get("category") or "E", []).append(p)
+    groups = []
+    for cat in sorted(by):
+        ms = by[cat]
+        daily = []
+        for i in range(len(dates)):
+            vals = [m["daily"][i] for m in ms if i < len(m.get("daily") or []) and m["daily"][i] is not None]
+            daily.append(float(np.mean(vals)) if vals else None)
+        groups.append({"category": cat, "label": GROUP_LABELS.get(cat, GROUP_LABELS["E"]), "n": len(ms),
+                       "members": [m["name"] for m in ms], "week_return": float(np.mean([m["week_return"] for m in ms])),
+                       "daily": daily,
+                       "top": sorted(({"name": m["name"], "week_return": m["week_return"]} for m in ms),
+                                     key=lambda x: -abs(x["week_return"]))[:3]})
+    notes: list[dict] = []
+    p_week = s.get("peer_return")
+    if len(groups) >= 2 and p_week is not None:
+        for g in groups:
+            gap = g["week_return"] - p_week
+            if abs(gap) >= GROUP_WEEK_GAP:
+                notes.append({"kind": "week", "category": g["category"], "label": g["label"], "group_return": g["week_return"],
+                              "peer_return": p_week, "gap": gap, "members": g["top"]})
+    for i, d in enumerate(res["days"]):
+        t = d.get("ret")
+        if t is None or abs(t) < BIG_DAY:
+            continue
+        movers = []
+        for g in groups:
+            v = g["daily"][i] if i < len(g["daily"]) else None
+            if v is not None and v * t > 0 and abs(v) >= abs(t) * BIG_DAY_SHARE:
+                idx = [m for m in by[g["category"]] if i < len(m.get("daily") or []) and m["daily"][i] is not None]
+                top = sorted(({"name": m["name"], "ret": m["daily"][i]} for m in idx), key=lambda x: -x["ret"] * np.sign(t))[:3]
+                movers.append({"category": g["category"], "label": g["label"], "group_ret": v, "members": top})
+        if movers:
+            notes.append({"kind": "day", "date": d["date"], "weekday": d.get("weekday"), "target_ret": t,
+                          "peer_avg": d.get("peer_avg"), "groups": movers})
+    return groups, notes
 
 
 def week_disclosures(db: Session, companies: list[Company], mon: date, sun: date) -> list[dict]:
